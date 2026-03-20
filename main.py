@@ -1,7 +1,20 @@
 import asyncio
 import websockets
 import os
+import base64
 from datetime import datetime
+from openai import AsyncOpenAI  # 引入异步的 OpenAI 客户端
+
+# ================= 核心配置区 =================
+# 🚨 替换为您在阿里云百炼申请的真实 API Key
+DASHSCOPE_API_KEY = "sk-1b296af163cc432483a8393a6eda87b0"
+
+# 初始化异步客户端，指向阿里云的兼容接口
+client = AsyncOpenAI(
+    api_key=DASHSCOPE_API_KEY,
+    base_url="https://dashscope.aliyuncs.com/compatible-mode/v1"
+)
+# ============================================
 
 # 创建一个专门存放抓拍图片的文件夹
 SAVE_DIR = "received_images"
@@ -28,14 +41,52 @@ async def handle_client(websocket):
                 print(
                     f"[{datetime.now().strftime('%H:%M:%S')}] 📸 成功接收并保存图片: {filename} (大小: {len(message)} 字节)")
 
+                # ================== 【接入 VLM 大脑】 ==================
+                try:
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] 🧠 正在呼叫 Qwen-VL 大脑分析图片...")
 
+                    # 1. 将内存中刚收到的字节流直接转换为 Base64 编码
+                    base64_image = base64.b64encode(message).decode('utf-8')
 
-                # ================== 【新增代码】 ==================
-                # 模拟大模型思考后生成的雅思口语题目，顺着通道发回手机
-                question_text = "Please describe the environment you are looking at in English."
-                await websocket.send(question_text)
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] 📤 已下发题目: {question_text}")
+                    # 2. 调用千问视觉大模型 (qwen-vl-plus)
+                    response = await client.chat.completions.create(
+                        model="qwen-vl-plus",
+                        messages=[
+                            {
+                                "role": "user",
+                                "content": [
+                                    {
+                                        "type": "image_url",
+                                        "image_url": {"url": f"data:image/webp;base64,{base64_image}"}
+                                    },
+                                    {
+                                        "type": "text",
+                                        # 🎯 全新升级的 Prompt：要求返回描述 + 关联问题，并用 ||| 分隔
+                                        "text": "你是一个雅思口语考官。请看这张第一人称视角的图片。\n"
+                                                "1. 先用英文极简地描述图片内容（约10个单词）。\n"
+                                                "2. 然后根据该场景，提出一个雅思口语 Part 1 风格的英文问题。\n"
+                                                "请严格使用 '|||' 作为分隔符，格式必须为：描述内容|||英文问题"
+                                    }
+                                ]
+                            }
+                        ]
+                    )
+
+                    # 3. 提取生成的复合文本 (例如: "I see a laptop on a desk.|||How often do you use a computer for work or study?")
+                    vlm_question = response.choices[0].message.content
+
+                    # 4. 顺着通道发回手机
+                    await websocket.send(vlm_question)
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] 📤 已下发 VLM 复合题目: {vlm_question}")
+
+                except Exception as api_error:
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ VLM 调用失败: {api_error}")
+                    # 容错机制：兜底文本也要加上 ||| 分隔符，保证眼镜端解析不报错
+                    fallback_text = "I notice the connection is unstable.|||Could you just describe what is in front of you right now?"
+                    await websocket.send(fallback_text)
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] 📤 已下发兜底题目: {fallback_text}")
                 # =================================================
+
             # 如果收到的是普通的文本消息（备用）
             else:
                 print(f"[{datetime.now().strftime('%H:%M:%S')}] 💬 收到文本消息: {message}")
