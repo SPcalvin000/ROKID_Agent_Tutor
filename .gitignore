@@ -1,0 +1,23 @@
+
+.venv/
+Agent_Project/received_images/
+
+
+# 环境变量（绝对不能上传！）
+.env
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 虚拟环境
+venv/
+env/
+
+# 我们之前代码里写的临时图片保存目录
+received_images/
+
+# IDE 配置文件
+.idea/
+.vscode/

@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>雅思 Agent 后端联调模拟器</title>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; padding: 20px; background-color: #f5f7fa; color: #333; }
+        .container { display: flex; gap: 20px; max-width: 1200px; margin: 0 auto; }
+        .panel { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); flex: 1; }
+        h2 { margin-top: 0; color: #2c3e50; border-bottom: 2px solid #eee; padding-bottom: 10px; }
+        .form-group { margin-bottom: 15px; }
+        label { display: block; margin-bottom: 5px; font-weight: bold; }
+        select, input[type="text"], input[type="file"] { width: 100%; padding: 8px; box-sizing: border-box; border: 1px solid #ccc; border-radius: 4px; }
+        button { background-color: #3498db; color: white; border: none; padding: 10px 20px; cursor: pointer; border-radius: 4px; font-weight: bold; width: 100%; }
+        button:hover { background-color: #2980b9; }
+        button:disabled { background-color: #95a5a6; cursor: not-allowed; }
+        .log-box { background: #1e1e1e; color: #00ff00; font-family: monospace; padding: 10px; border-radius: 4px; height: 400px; overflow-y: auto; white-space: pre-wrap; font-size: 13px; margin-top: 10px;}
+        .log-error { color: #ff6b6b; }
+        .log-send { color: #4da8da; }
+        .status-indicator { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background-color: red; margin-right: 5px;}
+        .status-connected { background-color: #2ecc71; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <div class="panel">
+        <h2>控制面板 <span id="ws-status" style="font-size: 14px; font-weight: normal; float: right;">🔴 未连接</span></h2>
+
+        <div class="form-group">
+            <label>后端 WebSocket 地址:</label>
+            <input type="text" id="ws-url" value="ws://127.0.0.1:8765">
+            <button onclick="connectWS()" id="btn-connect" style="margin-top: 5px; background-color: #2ecc71;">连接服务器</button>
+        </div>
+        <div class="form-group">
+            <label>⭐ 选择目标助手模块 (Agent Type):</label>
+            <select id="agent-type" style="border: 2px solid #3498db; font-weight: bold;">
+                <option value="ielts_speaking">🗣️ 口语助手 (IELTS)</option>
+                <option value="essay_grading">✍️ 批改助手 (Essay)</option>
+                <option value="note_assistant">📝 笔记助手 (Notes)</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <label>1. 选择触发的功能模块 (Event Type):</label>
+            <select id="event-type">
+                <option value="upload_image">📸 上传图像 (触发 VLM 模块)</option>
+                <option value="upload_audio">🎙️ 上传音频 (触发 ASR 模块)</option>
+                <option value="text_chat">💬 纯文本对话 (预留)</option>
+            </select>
+        </div>
+
+        <div class="form-group">
+            <label>2. 附加文件 (模拟摄像头/麦克风截取的数据):</label>
+            <input type="file" id="file-input">
+        </div>
+
+        <div class="form-group">
+            <label>Session ID (模拟当前用户):</label>
+            <input type="text" id="session-id" value="test_user_001">
+        </div>
+
+        <button onclick="sendPayload()" id="btn-send" disabled>构造 JSON 包并发送</button>
+    </div>
+
+    <div class="panel">
+        <h2>输入输出日志 (JSON 数据流)</h2>
+        <div id="log-console" class="log-box">等待操作...</div>
+    </div>
+</div>
+
+<script>
+    let ws = null;
+    const logConsole = document.getElementById('log-console');
+    const btnSend = document.getElementById('btn-send');
+    const wsStatus = document.getElementById('ws-status');
+
+    function log(msg, type='normal') {
+        const time = new Date().toLocaleTimeString();
+        let colorClass = '';
+        if(type === 'error') colorClass = 'log-error';
+        if(type === 'send') colorClass = 'log-send';
+        logConsole.innerHTML += `<span class="${colorClass}">[${time}] ${msg}</span>\n`;
+        logConsole.scrollTop = logConsole.scrollHeight;
+    }
+
+    function connectWS() {
+        const url = document.getElementById('ws-url').value;
+        log(`正在连接到 ${url}...`);
+        ws = new WebSocket(url);
+
+        ws.onopen = () => {
+            log('🟢 成功连接到后端服务器！');
+            wsStatus.innerHTML = '🟢 已连接';
+            btnSend.disabled = false;
+        };
+
+        ws.onmessage = (event) => {
+            log(`⬇️ 收到后端响应:\n${JSON.stringify(JSON.parse(event.data), null, 2)}`);
+        };
+
+        ws.onclose = () => {
+            log('🔴 与服务器断开连接。', 'error');
+            wsStatus.innerHTML = '🔴 未连接';
+            btnSend.disabled = true;
+        };
+
+        ws.onerror = (err) => {
+            log(`❌ WebSocket 发生错误。请确认后端 Python 脚本正在运行。`, 'error');
+        };
+    }
+
+    // 核心发包逻辑
+    function sendPayload() {
+        if (!ws || ws.readyState !== WebSocket.OPEN) {
+            alert('请先连接 WebSocket 服务器！');
+            return;
+        }
+
+        const agentType = document.getElementById('agent-type').value; // 新增获取 agent_type
+        const eventType = document.getElementById('event-type').value;
+        const sessionId = document.getElementById('session-id').value;
+        const fileInput = document.getElementById('file-input');
+
+        // 构造基础 JSON 信封
+        const payloadJson = {
+            agent_type: agentType,  // 告诉后端找哪个
+            event_type: eventType,
+            session_id: sessionId,
+            timestamp: Date.now(),
+            payload: {}
+        };
+
+        if (fileInput.files.length > 0) {
+            const file = fileInput.files[0];
+            const reader = new FileReader();
+
+            reader.onload = function(e) {
+                // FileReader 读出来的是 data:image/jpeg;base64,xxxxxx 的格式
+                // 我们只需要逗号后面的纯 Base64 字符串
+                const base64Data = e.target.result.split(',')[1];
+
+                payloadJson.payload.data = base64Data;
+                payloadJson.payload.filename = file.name;
+
+                // 发送 JSON 字符串
+                ws.send(JSON.stringify(payloadJson));
+                log(`⬆️ 发送 JSON 请求包 (附带文件):\n${JSON.stringify(payloadJson, null, 2)}`, 'send');
+            };
+            // 将文件读取为 Data URL (Base64)
+            reader.readAsDataURL(file);
+        } else {
+            // 没有附件的情况
+            ws.send(JSON.stringify(payloadJson));
+            log(`⬆️ 发送 JSON 请求包 (无文件):\n${JSON.stringify(payloadJson, null, 2)}`, 'send');
+        }
+    }
+</script>
+</body>
+</html>
