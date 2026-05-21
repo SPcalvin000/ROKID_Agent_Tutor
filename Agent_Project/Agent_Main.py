@@ -6,6 +6,7 @@ from datetime import datetime
 
 # 导入我们的子系统模块 (后续开发了新模块，只需在这里 import 即可)
 from agents import Speaking_agent
+from agents import academic_companion
 
 
 # from agents import essay_grading
@@ -34,6 +35,9 @@ async def handle_client(websocket):
                 if agent_type == "ielts_speaking":
                     # 将任务甩给雅思口语模块处理
                     response_data = await Speaking_agent.handle_request(event_type, session_id, payload)
+
+                elif agent_type == "academic_companion":
+                    response_data = await academic_companion.handle_request(event_type, session_id, payload)
 
                 elif agent_type == "essay_grading":
                     # 预留给作文批改模块
