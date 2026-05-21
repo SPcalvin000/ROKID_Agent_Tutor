@@ -27,7 +27,7 @@ client = AsyncOpenAI(
 # ================= 核心配置区 =================
 """
 # 🚨 替换为您在阿里云百炼申请的真实 API Key
-DASHSCOPE_API_KEY = "sk-1b296af163cc432483a8393a6eda87b0"
+DASHSCOPE_API_KEY = "sk-1b296af163cc432483a8393a6eda87b01"
 
 # 初始化异步客户端
 client = AsyncOpenAI(
