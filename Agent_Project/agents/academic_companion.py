@@ -4,11 +4,29 @@ import json
 import os
 import re
 import uuid
+from collections import Counter
 from datetime import datetime
 
 
 MAX_HISTORY = 24
 WORDS_PER_SECOND = 2.35
+TRANSCRIPT_STOPWORDS = {
+    "a", "an", "and", "are", "as", "at", "be", "because", "but", "by", "for", "from",
+    "have", "if", "in", "into", "is", "it", "of", "on", "or", "our", "so", "that",
+    "the", "their", "them", "there", "they", "this", "to", "we", "with", "you", "your",
+    "will", "can", "just", "then", "than", "also", "very", "really", "about", "what",
+}
+FILLER_PATTERNS = [
+    "um",
+    "uh",
+    "like",
+    "you know",
+    "i mean",
+    "sort of",
+    "kind of",
+    "basically",
+    "actually",
+]
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 STORE_PATH = os.path.join(DATA_DIR, "academic_companion_store.json")
@@ -706,10 +724,214 @@ def _default_fix_for_challenge(challenge, active_section_title="the current sect
     return "Turn this blocker into one concrete revision before the next rehearsal."
 
 
+def _sentence_list(text):
+    return [item.strip() for item in re.split(r"(?<=[\.\?!])\s+|\n+", str(text or "").strip()) if item.strip()]
+
+
+def _section_role(section):
+    combined = _safe_text(
+        f"{(section or {}).get('title', '')} {(section or {}).get('interaction_goal', '')}",
+        max_length=240,
+    ).lower()
+    if any(token in combined for token in ("opening", "intro", "hook")):
+        return "opening"
+    if any(token in combined for token in ("conclusion", "closing", "takeaway")):
+        return "conclusion"
+    if any(token in combined for token in ("evidence", "example", "proof", "data")):
+        return "evidence"
+    if any(token in combined for token in ("context", "background")):
+        return "context"
+    if any(token in combined for token in ("claim", "point", "argument", "core idea", "main point")):
+        return "core_argument"
+    return "general"
+
+
+def _section_specific_guidance(section):
+    role = _section_role(section)
+    title = (section or {}).get("title", "this section")
+    mapping = {
+        "opening": {
+            "focus": "Hook -> context -> roadmap",
+            "coach_note": f"For {title}, open with one vivid cue, explain why the topic matters, then preview where you are going.",
+            "revision_rule": "Do not spend too long on setup before the audience knows the main direction.",
+        },
+        "context": {
+            "focus": "Only the background the audience actually needs",
+            "coach_note": f"For {title}, define the problem quickly and move into the main claim before energy drops.",
+            "revision_rule": "Cut details that belong later in the explanation.",
+        },
+        "core_argument": {
+            "focus": "State the claim first, then unpack it",
+            "coach_note": f"For {title}, say the main point in one clean sentence before adding explanation.",
+            "revision_rule": "Avoid circling around the idea before naming it.",
+        },
+        "evidence": {
+            "focus": "One strong example -> why it matters",
+            "coach_note": f"For {title}, choose one example that proves the claim and explain the meaning immediately after it.",
+            "revision_rule": "Do not stack multiple examples if one already makes the point.",
+        },
+        "conclusion": {
+            "focus": "Takeaway -> significance -> confident ending",
+            "coach_note": f"For {title}, restate the takeaway, say why it matters, and stop cleanly instead of reopening the argument.",
+            "revision_rule": "Do not add new content in the last section.",
+        },
+        "general": {
+            "focus": "One section, one clear job",
+            "coach_note": f"For {title}, keep one clear purpose and make the transition to the next section explicit.",
+            "revision_rule": "If two ideas compete, split them or cut one.",
+        },
+    }
+    guidance = mapping.get(role, mapping["general"])
+    return {
+        "section_role": role,
+        **guidance,
+    }
+
+
+def _dedupe_strings(items):
+    seen = set()
+    ordered = []
+    for item in items:
+        key = str(item or "").strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        ordered.append(key)
+    return ordered
+
+
+def _transcript_expression_analysis(transcript_text, active_section):
+    cleaned = _safe_text(transcript_text, max_length=4000, preserve_lines=True)
+    if not cleaned:
+        return {
+            "status": "missing",
+            "issue_count": 0,
+            "issues": [],
+            "summary": "No transcript excerpt was provided for wording analysis yet.",
+        }
+
+    lowered = cleaned.lower()
+    sentences = _sentence_list(cleaned)
+    words = re.findall(r"[a-zA-Z']+", lowered)
+    avg_sentence_words = round(len(words) / max(1, len(sentences)), 1)
+    role = _section_role(active_section)
+    issues = []
+
+    filler_hits = []
+    for phrase in FILLER_PATTERNS:
+        count = len(re.findall(rf"(?<![a-z]){re.escape(phrase)}(?![a-z])", lowered))
+        if count > 0:
+            filler_hits.append({"phrase": phrase, "count": count})
+    filler_total = sum(item["count"] for item in filler_hits)
+    if filler_total >= 2:
+        issues.append(
+            {
+                "type": "filler_words",
+                "severity": "medium",
+                "title": "Filler words are interrupting delivery",
+                "note": f"Detected fillers such as {', '.join(item['phrase'] for item in filler_hits[:3])}.",
+                "recommended_fix": "Replace filler words with a short pause and restart the sentence cleanly.",
+            }
+        )
+
+    content_words = [
+        word
+        for word in words
+        if len(word) > 3 and word not in TRANSCRIPT_STOPWORDS
+    ]
+    repeated_terms = [
+        term for term, count in Counter(content_words).most_common(5)
+        if count >= 3
+    ]
+    if repeated_terms:
+        issues.append(
+            {
+                "type": "repetition",
+                "severity": "medium",
+                "title": "Some wording is repeating too much",
+                "note": f"Repeated terms include {', '.join(repeated_terms[:3])}.",
+                "recommended_fix": "Collapse repeated explanation into one line, then move forward.",
+            }
+        )
+
+    if avg_sentence_words >= 24:
+        issues.append(
+            {
+                "type": "dense_sentences",
+                "severity": "high",
+                "title": "Sentences are too dense for spoken delivery",
+                "note": f"Average sentence length is about {avg_sentence_words} words.",
+                "recommended_fix": "Break one long sentence into two shorter spoken units.",
+            }
+        )
+
+    signpost_tokens = ("first", "next", "then", "because", "so", "however", "for example", "finally", "overall")
+    has_signpost = any(token in lowered for token in signpost_tokens)
+    if len(sentences) >= 2 and not has_signpost:
+        issues.append(
+            {
+                "type": "weak_signposting",
+                "severity": "medium",
+                "title": "The explanation needs clearer signposting",
+                "note": "The transcript sample does not show strong transition language.",
+                "recommended_fix": "Add one signpost phrase such as 'next', 'for example', or 'overall'.",
+            }
+        )
+
+    if role == "opening" and not any(token in lowered for token in ("today", "i want", "i will", "this presentation", "this talk")):
+        issues.append(
+            {
+                "type": "weak_opening_frame",
+                "severity": "medium",
+                "title": "The opening frame is still soft",
+                "note": "The audience may not hear the purpose of the talk quickly enough.",
+                "recommended_fix": "State the topic and direction explicitly in the first two sentences.",
+            }
+        )
+    if role == "conclusion" and not any(token in lowered for token in ("in summary", "overall", "therefore", "takeaway", "in conclusion", "to conclude")):
+        issues.append(
+            {
+                "type": "weak_conclusion",
+                "severity": "medium",
+                "title": "The ending does not land the takeaway yet",
+                "note": "The sample lacks a clear concluding signal.",
+                "recommended_fix": "Add one final takeaway sentence and a clear stopping point.",
+            }
+        )
+    if role == "evidence" and not any(token in lowered for token in ("for example", "for instance", "evidence", "data", "shows", "suggests", "because")):
+        issues.append(
+            {
+                "type": "weak_evidence_link",
+                "severity": "medium",
+                "title": "The evidence section needs a stronger proof link",
+                "note": "The sample does not clearly mark where the proof appears or why it matters.",
+                "recommended_fix": "Name the example clearly, then say what it proves in one sentence.",
+            }
+        )
+
+    status = "stable" if not issues else ("attention_needed" if any(item["severity"] == "high" for item in issues) else "needs_refinement")
+    summary = (
+        "Transcript wording looks usable for a live rehearsal."
+        if not issues
+        else f"Transcript analysis found {len(issues)} wording risk(s), led by: {issues[0]['title']}."
+    )
+    return {
+        "status": status,
+        "sentence_count": len(sentences),
+        "avg_sentence_words": avg_sentence_words,
+        "filler_total": filler_total,
+        "repeated_terms": repeated_terms[:3],
+        "issue_count": len(issues),
+        "issues": issues[:4],
+        "summary": summary,
+    }
+
+
 def _build_rehearsal_analysis(mission, rehearsal_entry):
     if not rehearsal_entry:
         return {}
 
+    active_section = _active_section(mission)
     duration_minutes = _safe_float(rehearsal_entry.get("duration_minutes"), default=0.0)
     target_minutes = _safe_float(mission.get("target_duration_minutes"), default=0.0)
     actual_seconds = int(round(duration_minutes * 60)) if duration_minutes > 0 else 0
@@ -725,6 +947,7 @@ def _build_rehearsal_analysis(mission, rehearsal_entry):
     }
     transcript_words = _safe_int(rehearsal_entry.get("transcript_word_count"), default=_word_count(rehearsal_entry.get("transcript_excerpt", "")))
     transcript_density = _transcript_density_status(transcript_words, target_minutes)
+    transcript_analysis = _transcript_expression_analysis(rehearsal_entry.get("transcript_excerpt", ""), active_section)
     confidence_score = max(
         _safe_int(rehearsal_entry.get("confidence_level"), default=0),
         _safe_int(rehearsal_entry.get("self_rating"), default=0),
@@ -749,6 +972,8 @@ def _build_rehearsal_analysis(mission, rehearsal_entry):
         recommendations.append("Your transcript sample is still thin; capture a fuller rehearsal excerpt for better feedback.")
     elif transcript_density == "dense":
         recommendations.append("The spoken script may be too dense; convert one sentence block into cue words.")
+    for issue in transcript_analysis.get("issues", []):
+        recommendations.append(issue.get("recommended_fix", "Refine the wording before the next run."))
     if confidence_score and confidence_score <= 2:
         recommendations.append("Stabilize the opening and first transition before changing later slides.")
     if script_summary.get("completed_sections", 0) < script_summary.get("section_count", 0):
@@ -761,6 +986,7 @@ def _build_rehearsal_analysis(mission, rehearsal_entry):
         recommendations.append("Keep the structure stable and do one more timed rehearsal with the same outline.")
 
     delta_seconds = actual_seconds - target_seconds if target_seconds > 0 else 0
+    recommendations = _dedupe_strings(recommendations)
     return {
         "timing_status": pacing["status"],
         "timing_note": pacing["note"],
@@ -768,6 +994,9 @@ def _build_rehearsal_analysis(mission, rehearsal_entry):
         "timing_delta_label": _format_mmss(abs(delta_seconds)),
         "transcript_density": transcript_density,
         "transcript_word_count": transcript_words,
+        "active_section_role": _section_role(active_section),
+        "active_section_guidance": _section_specific_guidance(active_section),
+        "transcript_analysis": transcript_analysis,
         "confidence_label": _confidence_label(confidence_score),
         "script_completion_ratio": (
             round(script_summary.get("completed_sections", 0) / max(1, script_summary.get("section_count", 0)), 2)
@@ -869,6 +1098,16 @@ def _build_delivery_risks(mission, script_summary, latest_difficulty, latest_reh
                 "recommended_fix": "Complete the empty cards before the next full rehearsal.",
             }
         )
+    for issue in (latest_rehearsal_analysis.get("transcript_analysis", {}) or {}).get("issues", [])[:2]:
+        risks.append(
+            {
+                "type": "wording_risk",
+                "severity": issue.get("severity", "medium"),
+                "title": issue.get("title", "Wording risk"),
+                "note": issue.get("note", ""),
+                "recommended_fix": issue.get("recommended_fix", ""),
+            }
+        )
     return risks[:4]
 
 
@@ -950,6 +1189,8 @@ def _build_readiness_summary(mission, script_summary, latest_difficulty, latest_
     score -= min(15, section_timing_summary.get("overrun_sections", 0) * 5)
     if latest_difficulty and not _safe_bool(latest_difficulty.get("resolved"), default=False):
         score -= 8
+    transcript_issue_count = (latest_rehearsal_analysis.get("transcript_analysis", {}) or {}).get("issue_count", 0)
+    score -= min(12, transcript_issue_count * 4)
 
     safe_score = max(0, min(100, score))
     strengths = []
@@ -975,6 +1216,9 @@ def _build_readiness_summary(mission, script_summary, latest_difficulty, latest_
         )
     if latest_rehearsal_analysis.get("transcript_density") == "thin":
         blockers.append("The transcript sample is still too thin for strong rehearsal feedback.")
+    transcript_issues = (latest_rehearsal_analysis.get("transcript_analysis", {}) or {}).get("issues", [])
+    if transcript_issues:
+        blockers.append(transcript_issues[0].get("title", "There is still a wording issue in the current transcript."))
     if not strengths:
         strengths.append("The structure is now stable enough to support targeted rehearsal.")
     if not blockers:
@@ -992,6 +1236,7 @@ def _build_practice_drills(mission, latest_difficulty, latest_rehearsal_analysis
     active_section = _active_section(mission)
     section_timing_summary = latest_rehearsal_analysis.get("section_timing_summary", {}) or {}
     largest_overrun = section_timing_summary.get("largest_overrun", {}) or {}
+    transcript_issues = (latest_rehearsal_analysis.get("transcript_analysis", {}) or {}).get("issues", [])
     drills = []
 
     if largest_overrun:
@@ -1035,6 +1280,45 @@ def _build_practice_drills(mission, latest_difficulty, latest_rehearsal_analysis
                 ],
             }
         )
+    if any(issue.get("type") == "dense_sentences" for issue in transcript_issues):
+        drills.append(
+            {
+                "drill_type": "sentence_split",
+                "title": "Split dense sentences",
+                "goal": "Make the spoken wording easier to deliver live.",
+                "steps": [
+                    "Pick the longest sentence from your transcript excerpt.",
+                    "Break it into two shorter spoken lines with one pause.",
+                    "Rehearse only that rewritten pair three times before the next full run.",
+                ],
+            }
+        )
+    if any(issue.get("type") == "weak_signposting" for issue in transcript_issues):
+        drills.append(
+            {
+                "drill_type": "signpost_upgrade",
+                "title": "Add explicit signposts",
+                "goal": "Make the audience feel the structure instead of guessing it.",
+                "steps": [
+                    "Add one transition phrase to the current section: next, for example, however, or overall.",
+                    "Deliver the section once with the new signpost.",
+                    "Check whether the transition now sounds easier to follow aloud.",
+                ],
+            }
+        )
+    if any(issue.get("type") == "repetition" for issue in transcript_issues):
+        drills.append(
+            {
+                "drill_type": "repetition_cut",
+                "title": "Cut repeated explanation",
+                "goal": "Remove one repeated idea so the point lands faster.",
+                "steps": [
+                    "Underline the repeated term or repeated idea in the transcript excerpt.",
+                    "Keep the strongest line and delete the weaker repetition.",
+                    "Say the shorter version aloud once immediately.",
+                ],
+            }
+        )
 
     if not drills:
         drills.append(
@@ -1060,6 +1344,20 @@ def _build_mock_qa_prompt(mission):
         "question": question,
         "answer_framework": qa_prep.get("answer_framework", "Claim -> Evidence -> Takeaway"),
         "tip": (qa_prep.get("answer_tips") or ["Answer first, then justify with one example."])[0],
+    }
+
+
+def _build_section_coaching(mission, latest_rehearsal_analysis):
+    active_section = _active_section(mission)
+    guidance = _section_specific_guidance(active_section)
+    transcript_issues = (latest_rehearsal_analysis.get("transcript_analysis", {}) or {}).get("issues", [])
+    primary_issue = transcript_issues[0] if transcript_issues else {}
+    return {
+        "active_section_id": active_section.get("section_id", ""),
+        "active_section_title": active_section.get("title", ""),
+        **guidance,
+        "primary_issue": primary_issue,
+        "coaching_prompt": primary_issue.get("recommended_fix") or guidance.get("coach_note", ""),
     }
 
 
@@ -1403,6 +1701,7 @@ def _build_review(mission):
             "latest": latest_rehearsal,
             "latest_analysis": latest_rehearsal_analysis,
         },
+        "section_coaching": _build_section_coaching(mission, latest_rehearsal_analysis),
         "delivery_risks": _build_delivery_risks(
             mission,
             script_summary,
@@ -1781,6 +2080,8 @@ def _build_chat_reply(message, mission):
     latest_rehearsal_analysis = review.get("rehearsal_overview", {}).get("latest_analysis", {}) or {}
     readiness_summary = review.get("readiness_summary", {}) or {}
     practice_drills = review.get("practice_drills", []) or []
+    section_coaching = review.get("section_coaching", {}) or {}
+    transcript_analysis = latest_rehearsal_analysis.get("transcript_analysis", {}) or {}
     lowered = message.lower()
 
     if not message:
@@ -1813,6 +2114,14 @@ def _build_chat_reply(message, mission):
         return (
             "Choose one example that directly proves your main claim, then say why it matters instead of stacking more detail."
         )
+    if "transcript" in lowered or "wording" in lowered or "phrasing" in lowered:
+        if transcript_analysis.get("issues"):
+            first_issue = transcript_analysis["issues"][0]
+            return (
+                f"The main wording issue right now is: {first_issue.get('title', 'wording clarity')}. "
+                f"{first_issue.get('recommended_fix', 'Tighten one sentence before the next run.')}"
+            )
+        return "The current transcript wording looks stable enough for another rehearsal; now focus on pacing and delivery."
     if "question" in lowered or "qa" in lowered:
         mock_prompt = _build_mock_qa_prompt(mission)
         if any(token in lowered for token in ("ask me", "quiz", "mock", "practice question")):
@@ -1840,6 +2149,12 @@ def _build_chat_reply(message, mission):
                 f"Step 2: {steps[1] if len(steps) > 1 else 'Note what changed.'}"
             )
         return "Pick one delivery variable and rehearse only that: timing, confidence, or transitions."
+    if "current section" in lowered or "this section" in lowered or "active section" in lowered:
+        return (
+            f"The current section is {section_coaching.get('active_section_title', active_title)}. "
+            f"Focus: {section_coaching.get('focus', 'one clear job')}. "
+            f"{section_coaching.get('coaching_prompt', section_coaching.get('coach_note', 'Tighten the wording and rehearse it aloud.'))}"
+        )
     if "slide" in lowered or "card" in lowered:
         return (
             f"The current active card is {active_title}. Keep the slide text minimal and move the fuller explanation into speaker notes."
