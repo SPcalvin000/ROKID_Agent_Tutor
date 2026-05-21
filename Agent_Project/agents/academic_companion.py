@@ -912,6 +912,157 @@ def _build_qa_prep(mission):
     }
 
 
+def _readiness_band(score):
+    safe_score = max(0, min(100, _safe_int(score, default=0)))
+    if safe_score >= 85:
+        return "ready"
+    if safe_score >= 70:
+        return "almost ready"
+    if safe_score >= 50:
+        return "developing"
+    return "early stage"
+
+
+def _build_readiness_summary(mission, script_summary, latest_difficulty, latest_rehearsal_analysis):
+    score = 100
+    completed_sections = script_summary.get("completed_sections", 0)
+    section_count = max(1, script_summary.get("section_count", 0))
+    completion_ratio = completed_sections / section_count
+    score -= int(round((1 - completion_ratio) * 30))
+
+    timing_status = latest_rehearsal_analysis.get("timing_status", "unknown")
+    if timing_status == "long":
+        score -= 15
+    elif timing_status == "short":
+        score -= 10
+    elif timing_status == "unknown":
+        score -= 6
+
+    confidence_label = latest_rehearsal_analysis.get("confidence_label", "unrated")
+    if confidence_label == "very fragile":
+        score -= 20
+    elif confidence_label == "fragile":
+        score -= 12
+    elif confidence_label == "unrated":
+        score -= 6
+
+    section_timing_summary = latest_rehearsal_analysis.get("section_timing_summary", {}) or {}
+    score -= min(15, section_timing_summary.get("overrun_sections", 0) * 5)
+    if latest_difficulty and not _safe_bool(latest_difficulty.get("resolved"), default=False):
+        score -= 8
+
+    safe_score = max(0, min(100, score))
+    strengths = []
+    blockers = []
+    if completion_ratio >= 0.8:
+        strengths.append("Most speaking cards already contain usable rehearsal material.")
+    if latest_rehearsal_analysis.get("timing_status") == "balanced":
+        strengths.append("Overall rehearsal pacing is close to the target window.")
+    if confidence_label in {"steady", "confident"}:
+        strengths.append(f"Delivery confidence is currently {confidence_label}.")
+    if section_timing_summary.get("balanced_sections", 0) >= max(1, section_count // 2):
+        strengths.append("Several sections are already pacing at a balanced speed.")
+
+    if completion_ratio < 1.0:
+        blockers.append("Some speaking cards are still incomplete.")
+    if section_timing_summary.get("largest_overrun"):
+        blockers.append(
+            f"{section_timing_summary['largest_overrun'].get('title', 'One section')} is still your biggest pacing risk."
+        )
+    if latest_difficulty and not _safe_bool(latest_difficulty.get("resolved"), default=False):
+        blockers.append(
+            f"The latest blocker is still {latest_difficulty.get('challenge') or 'unresolved'}."
+        )
+    if latest_rehearsal_analysis.get("transcript_density") == "thin":
+        blockers.append("The transcript sample is still too thin for strong rehearsal feedback.")
+    if not strengths:
+        strengths.append("The structure is now stable enough to support targeted rehearsal.")
+    if not blockers:
+        blockers.append("No major blocker is dominating right now; refine delivery instead of rewriting structure.")
+
+    return {
+        "score": safe_score,
+        "band": _readiness_band(safe_score),
+        "strengths": strengths[:3],
+        "blockers": blockers[:3],
+    }
+
+
+def _build_practice_drills(mission, latest_difficulty, latest_rehearsal_analysis):
+    active_section = _active_section(mission)
+    section_timing_summary = latest_rehearsal_analysis.get("section_timing_summary", {}) or {}
+    largest_overrun = section_timing_summary.get("largest_overrun", {}) or {}
+    drills = []
+
+    if largest_overrun:
+        drills.append(
+            {
+                "drill_type": "timing_trim",
+                "title": f"Trim {largest_overrun.get('title', 'the longest section')}",
+                "goal": f"Recover about {largest_overrun.get('delta_label', '0:00')} from the most overloaded section.",
+                "steps": [
+                    f"Read {largest_overrun.get('title', 'that section')} aloud once at normal speed.",
+                    "Underline the one sentence that repeats an idea you already made.",
+                    "Cut that sentence and rehearse the section again immediately.",
+                ],
+            }
+        )
+
+    if latest_difficulty and "transition" in _safe_text(latest_difficulty.get("challenge"), max_length=120).lower():
+        drills.append(
+            {
+                "drill_type": "transition_bridge",
+                "title": "Bridge the transition",
+                "goal": "Make the move between sections feel intentional instead of abrupt.",
+                "steps": [
+                    f"Write one bridge sentence at the end of {active_section.get('title', 'the current section')}.",
+                    "Say that bridge sentence aloud three times without changing the wording.",
+                    "Then deliver the last line of the current section plus the first line of the next section as one unit.",
+                ],
+            }
+        )
+
+    if latest_rehearsal_analysis.get("confidence_label") in {"fragile", "very fragile"}:
+        drills.append(
+            {
+                "drill_type": "opening_stability",
+                "title": "Stabilize the opening",
+                "goal": "Lower anxiety by making the first 20 seconds automatic.",
+                "steps": [
+                    "Stand up and deliver only the first 20 seconds.",
+                    "Pause, reset your breath, and repeat it two more times.",
+                    "Keep the wording stable; do not improvise in this drill.",
+                ],
+            }
+        )
+
+    if not drills:
+        drills.append(
+            {
+                "drill_type": "full_run_refresh",
+                "title": "One focused full run",
+                "goal": "Keep the structure stable while improving one delivery variable.",
+                "steps": [
+                    "Pick one target: timing, confidence, or transitions.",
+                    "Run the full presentation once without rewriting the script mid-way.",
+                    "Write one note on what improved and one note on what still feels unstable.",
+                ],
+            }
+        )
+    return drills[:3]
+
+
+def _build_mock_qa_prompt(mission):
+    qa_prep = _build_qa_prep(mission)
+    likely_questions = qa_prep.get("likely_questions", [])
+    question = likely_questions[0] if likely_questions else "What is the main takeaway of your presentation?"
+    return {
+        "question": question,
+        "answer_framework": qa_prep.get("answer_framework", "Claim -> Evidence -> Takeaway"),
+        "tip": (qa_prep.get("answer_tips") or ["Answer first, then justify with one example."])[0],
+    }
+
+
 def _normalize_phase(value):
     normalized = _safe_text(value, max_length=24).lower()
     if normalized in {"planning", "drafting", "rehearsing", "refining", "complete"}:
@@ -1204,6 +1355,12 @@ def _build_review(mission):
     latest_rehearsal = rehearsal_history[-1] if rehearsal_history else {}
     script_summary = _build_script_summary(sections, target_minutes=mission.get("target_duration_minutes", 0.0))
     latest_rehearsal_analysis = latest_rehearsal.get("analysis", {}) or _build_rehearsal_analysis(mission, latest_rehearsal)
+    readiness_summary = _build_readiness_summary(
+        mission,
+        script_summary,
+        latest_difficulty,
+        latest_rehearsal_analysis,
+    )
 
     return {
         "mission_id": mission.get("mission_id"),
@@ -1249,6 +1406,12 @@ def _build_review(mission):
         "delivery_risks": _build_delivery_risks(
             mission,
             script_summary,
+            latest_difficulty,
+            latest_rehearsal_analysis,
+        ),
+        "readiness_summary": readiness_summary,
+        "practice_drills": _build_practice_drills(
+            mission,
             latest_difficulty,
             latest_rehearsal_analysis,
         ),
@@ -1616,6 +1779,8 @@ def _build_chat_reply(message, mission):
     latest_difficulty = review["difficulty_overview"].get("latest") or {}
     coaching_summary = review.get("coaching_summary", {})
     latest_rehearsal_analysis = review.get("rehearsal_overview", {}).get("latest_analysis", {}) or {}
+    readiness_summary = review.get("readiness_summary", {}) or {}
+    practice_drills = review.get("practice_drills", []) or []
     lowered = message.lower()
 
     if not message:
@@ -1649,9 +1814,32 @@ def _build_chat_reply(message, mission):
             "Choose one example that directly proves your main claim, then say why it matters instead of stacking more detail."
         )
     if "question" in lowered or "qa" in lowered:
+        mock_prompt = _build_mock_qa_prompt(mission)
+        if any(token in lowered for token in ("ask me", "quiz", "mock", "practice question")):
+            return (
+                f"Mock Q&A for {mission_title}: {mock_prompt['question']} "
+                f"Answer with {mock_prompt['answer_framework']}. Tip: {mock_prompt['tip']}"
+            )
         return (
             "Prepare short answers with a 3-step frame: answer first, justify with one example, then return to the takeaway."
         )
+    if "ready" in lowered or "prepared" in lowered:
+        return (
+            f"Right now {mission_title} looks {readiness_summary.get('band', 'in progress')} "
+            f"with a readiness score of {readiness_summary.get('score', 0)}/100. "
+            f"The main blocker is: {(readiness_summary.get('blockers') or ['keep rehearsing the structure'])[0]}"
+        )
+    if "drill" in lowered or "practice" in lowered:
+        first_drill = practice_drills[0] if practice_drills else {}
+        if first_drill:
+            steps = first_drill.get("steps", [])
+            return (
+                f"Try this drill next: {first_drill.get('title', 'Focused rehearsal drill')}. "
+                f"Goal: {first_drill.get('goal', 'Improve one delivery variable.')}. "
+                f"Step 1: {steps[0] if len(steps) > 0 else 'Run one focused repetition.'} "
+                f"Step 2: {steps[1] if len(steps) > 1 else 'Note what changed.'}"
+            )
+        return "Pick one delivery variable and rehearse only that: timing, confidence, or transitions."
     if "slide" in lowered or "card" in lowered:
         return (
             f"The current active card is {active_title}. Keep the slide text minimal and move the fuller explanation into speaker notes."
