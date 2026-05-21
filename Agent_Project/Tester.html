@@ -11,7 +11,8 @@
         h2 { margin-top: 0; color: #2c3e50; border-bottom: 2px solid #eee; padding-bottom: 10px; }
         .form-group { margin-bottom: 15px; }
         label { display: block; margin-bottom: 5px; font-weight: bold; }
-        select, input[type="text"], input[type="file"] { width: 100%; padding: 8px; box-sizing: border-box; border: 1px solid #ccc; border-radius: 4px; }
+        select, input[type="text"], input[type="file"], textarea { width: 100%; padding: 8px; box-sizing: border-box; border: 1px solid #ccc; border-radius: 4px; }
+        textarea { min-height: 110px; resize: vertical; font-family: Consolas, monospace; }
         button { background-color: #3498db; color: white; border: none; padding: 10px 20px; cursor: pointer; border-radius: 4px; font-weight: bold; width: 100%; }
         button:hover { background-color: #2980b9; }
         button:disabled { background-color: #95a5a6; cursor: not-allowed; }
@@ -20,6 +21,7 @@
         .log-send { color: #4da8da; }
         .status-indicator { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background-color: red; margin-right: 5px;}
         .status-connected { background-color: #2ecc71; }
+        .helper-text { margin-top: 6px; color: #666; font-size: 12px; line-height: 1.5; }
     </style>
 </head>
 <body>
@@ -37,6 +39,7 @@
             <label>⭐ 选择目标助手模块 (Agent Type):</label>
             <select id="agent-type" style="border: 2px solid #3498db; font-weight: bold;">
                 <option value="ielts_speaking">🗣️ 口语助手 (IELTS)</option>
+                <option value="academic_companion">🎓 学习陪伴助手 (Academic)</option>
                 <option value="essay_grading">✍️ 批改助手 (Essay)</option>
                 <option value="note_assistant">📝 笔记助手 (Notes)</option>
             </select>
@@ -46,18 +49,28 @@
             <select id="event-type">
                 <option value="upload_image">📸 上传图像 (触发 VLM 模块)</option>
                 <option value="upload_audio">🎙️ 上传音频 (触发 ASR 模块)</option>
-                <option value="text_chat">💬 纯文本对话 (预留)</option>
+                <option value="text_chat">💬 纯文本对话</option>
+                <option value="state_update">📊 状态更新</option>
+                <option value="difficulty_event">⚠️ 困难事件</option>
+                <option value="session_review">🧾 会话总结</option>
             </select>
         </div>
 
         <div class="form-group">
             <label>2. 附加文件 (模拟摄像头/麦克风截取的数据):</label>
             <input type="file" id="file-input">
+            <div class="helper-text">`academic_companion` 通常只需要下面的 JSON payload；文件上传主要给 `ielts_speaking` 使用。</div>
         </div>
 
         <div class="form-group">
             <label>Session ID (模拟当前用户):</label>
             <input type="text" id="session-id" value="test_user_001">
+        </div>
+
+        <div class="form-group">
+            <label>3. 自定义 Payload JSON (可选):</label>
+            <textarea id="payload-json" placeholder='{"message":"Help me rehearse my opening.","task":"presentation prep","focus_level":"medium"}'></textarea>
+            <div class="helper-text">例如 `state_update`: {"task":"slides","focus_level":"medium"}；`difficulty_event`: {"challenge":"timing","severity":"high"}。</div>
         </div>
 
         <button onclick="sendPayload()" id="btn-send" disabled>构造 JSON 包并发送</button>
@@ -121,6 +134,7 @@
         const eventType = document.getElementById('event-type').value;
         const sessionId = document.getElementById('session-id').value;
         const fileInput = document.getElementById('file-input');
+        const payloadInput = document.getElementById('payload-json').value.trim();
 
         // 构造基础 JSON 信封
         const payloadJson = {
@@ -130,6 +144,23 @@
             timestamp: Date.now(),
             payload: {}
         };
+
+        if (payloadInput) {
+            let customPayload = null;
+            try {
+                customPayload = JSON.parse(payloadInput);
+            } catch (error) {
+                alert('自定义 Payload JSON 格式无效，请检查后重试。');
+                return;
+            }
+
+            if (!customPayload || typeof customPayload !== 'object' || Array.isArray(customPayload)) {
+                alert('自定义 Payload JSON 必须是一个对象。');
+                return;
+            }
+
+            payloadJson.payload = { ...customPayload };
+        }
 
         if (fileInput.files.length > 0) {
             const file = fileInput.files[0];
