@@ -558,6 +558,114 @@ def _build_script_summary(sections, target_minutes=0):
     }
 
 
+def _distribute_section_seconds(sections, total_duration_seconds):
+    safe_total = max(0, _safe_int(total_duration_seconds, default=0))
+    if safe_total <= 0 or not sections:
+        return []
+    target_total = sum(
+        max(0, _safe_int(item.get("target_seconds") or item.get("planned_seconds"), default=0))
+        for item in sections
+    )
+    if target_total <= 0:
+        even_seconds = int(round(safe_total / max(1, len(sections))))
+        return [even_seconds for _ in sections]
+
+    allocated = []
+    used = 0
+    for index, section in enumerate(sections):
+        target_seconds = max(0, _safe_int(section.get("target_seconds") or section.get("planned_seconds"), default=0))
+        if index == len(sections) - 1:
+            actual_seconds = max(0, safe_total - used)
+        else:
+            actual_seconds = int(round(safe_total * (target_seconds / target_total)))
+            used += actual_seconds
+        allocated.append(actual_seconds)
+    return allocated
+
+
+def _normalize_section_timings(sections, section_timings=None, total_duration_seconds=0):
+    normalized_sections = _normalize_sections(sections)
+    provided = section_timings if isinstance(section_timings, list) else []
+    distributed = _distribute_section_seconds(normalized_sections, total_duration_seconds) if not provided else []
+
+    section_map = {}
+    slide_map = {}
+    for item in provided:
+        if not isinstance(item, dict):
+            continue
+        section_id = _safe_text(item.get("section_id"), max_length=80)
+        slide_index = _safe_int(item.get("slide_index"), default=0)
+        if section_id:
+            section_map[section_id] = item
+        if slide_index > 0:
+            slide_map[slide_index] = item
+
+    normalized = []
+    for index, section in enumerate(normalized_sections):
+        raw_entry = section_map.get(section.get("section_id", "")) or slide_map.get(_safe_int(section.get("slide_index"), default=0)) or {}
+        actual_seconds = max(
+            0,
+            _safe_int(
+                raw_entry.get("actual_seconds"),
+                default=_safe_int(
+                    raw_entry.get("duration_seconds"),
+                    default=_safe_int(raw_entry.get("seconds"), default=(distributed[index] if distributed else 0)),
+                ),
+            ),
+        )
+        target_seconds = max(0, _safe_int(section.get("target_seconds") or section.get("planned_seconds"), default=0))
+        hint = _section_duration_hint(actual_seconds, target_seconds) if actual_seconds > 0 else {
+            "status": "missing",
+            "note": "No measured timing was recorded for this section yet.",
+        }
+        normalized.append(
+            {
+                "section_id": section.get("section_id", ""),
+                "title": section.get("title", ""),
+                "slide_index": _safe_int(section.get("slide_index"), default=0),
+                "target_seconds": target_seconds,
+                "target_label": _format_mmss(target_seconds),
+                "actual_seconds": actual_seconds,
+                "actual_label": _format_mmss(actual_seconds),
+                "delta_seconds": actual_seconds - target_seconds,
+                "delta_label": _format_mmss(abs(actual_seconds - target_seconds)),
+                "timing_status": hint["status"],
+                "timing_note": hint["note"],
+                "notes": _safe_text(raw_entry.get("notes"), max_length=600, preserve_lines=True),
+            }
+        )
+    return normalized
+
+
+def _section_timing_summary(section_timings):
+    if not isinstance(section_timings, list) or not section_timings:
+        return {
+            "count": 0,
+            "covered_sections": 0,
+            "overrun_sections": 0,
+            "underrun_sections": 0,
+            "balanced_sections": 0,
+            "largest_overrun": {},
+            "largest_underrun": {},
+        }
+
+    covered_sections = sum(1 for item in section_timings if _safe_int(item.get("actual_seconds"), default=0) > 0)
+    overrun_sections = [item for item in section_timings if item.get("timing_status") == "long"]
+    underrun_sections = [item for item in section_timings if item.get("timing_status") == "short"]
+    balanced_sections = sum(1 for item in section_timings if item.get("timing_status") == "balanced")
+    largest_overrun = max(overrun_sections, key=lambda item: _safe_int(item.get("delta_seconds"), default=0), default={})
+    largest_underrun = min(underrun_sections, key=lambda item: _safe_int(item.get("delta_seconds"), default=0), default={})
+    return {
+        "count": len(section_timings),
+        "covered_sections": covered_sections,
+        "overrun_sections": len(overrun_sections),
+        "underrun_sections": len(underrun_sections),
+        "balanced_sections": balanced_sections,
+        "largest_overrun": largest_overrun,
+        "largest_underrun": largest_underrun,
+    }
+
+
 def _confidence_label(score):
     safe_score = max(0, min(5, _safe_int(score, default=0)))
     if safe_score >= 4:
@@ -610,6 +718,7 @@ def _build_rehearsal_analysis(mission, rehearsal_entry):
         mission.get("script_sections", []),
         target_minutes=mission.get("target_duration_minutes", 0.0),
     )
+    section_timing_summary = _section_timing_summary(rehearsal_entry.get("section_timings", []))
     pacing = _section_duration_hint(actual_seconds, target_seconds) if target_seconds > 0 else {
         "status": "unknown",
         "note": "Set a target duration to compare rehearsal pacing.",
@@ -626,6 +735,16 @@ def _build_rehearsal_analysis(mission, rehearsal_entry):
         recommendations.append("Trim one example or compress one explanation before the next full run.")
     elif pacing["status"] == "short":
         recommendations.append("Add one clarifying sentence or one stronger example to reach the target window.")
+    if section_timing_summary.get("largest_overrun"):
+        overrun = section_timing_summary["largest_overrun"]
+        recommendations.append(
+            f"Your biggest overrun is {overrun.get('title', 'one section')}; trim about {overrun.get('delta_label', '0:00')} there first."
+        )
+    elif section_timing_summary.get("largest_underrun"):
+        underrun = section_timing_summary["largest_underrun"]
+        recommendations.append(
+            f"{underrun.get('title', 'One section')} is running short; add one clarifying line or example there."
+        )
     if transcript_density == "thin":
         recommendations.append("Your transcript sample is still thin; capture a fuller rehearsal excerpt for better feedback.")
     elif transcript_density == "dense":
@@ -653,6 +772,7 @@ def _build_rehearsal_analysis(mission, rehearsal_entry):
         "script_completion_ratio": (
             round(script_summary.get("completed_sections", 0) / max(1, script_summary.get("section_count", 0)), 2)
         ),
+        "section_timing_summary": section_timing_summary,
         "recommendations": recommendations[:4],
     }
 
@@ -674,6 +794,13 @@ def _build_coaching_summary(mission, script_summary, difficulty_events, rehearsa
     elif rehearsal_analysis.get("timing_status") == "long":
         priority = "timing"
         coach_message = "Your run is still long. Cut one example or compress one explanation before the next rehearsal."
+    elif rehearsal_analysis.get("section_timing_summary", {}).get("largest_overrun"):
+        priority = "section pacing"
+        largest_overrun = rehearsal_analysis["section_timing_summary"]["largest_overrun"]
+        coach_message = (
+            f"The main pacing risk is {largest_overrun.get('title', 'one section')}. "
+            f"Trim about {largest_overrun.get('delta_label', '0:00')} there first."
+        )
     elif script_summary.get("completed_sections", 0) < script_summary.get("section_count", 0):
         priority = "script completion"
         coach_message = "Finish the empty speaking cards first so the next rehearsal measures delivery, not missing content."
@@ -692,6 +819,96 @@ def _build_coaching_summary(mission, script_summary, difficulty_events, rehearsa
             or mission.get("presentation_state", {}).get("focus_area", "")
         ),
         "recommended_actions": rehearsal_analysis.get("recommendations", [])[:3],
+    }
+
+
+def _build_delivery_risks(mission, script_summary, latest_difficulty, latest_rehearsal_analysis):
+    risks = []
+    if latest_difficulty:
+        risks.append(
+            {
+                "type": "difficulty_event",
+                "severity": latest_difficulty.get("severity", "medium"),
+                "title": latest_difficulty.get("challenge") or "recent blocker",
+                "note": latest_difficulty.get("context") or latest_difficulty.get("suggested_fix") or "",
+                "recommended_fix": latest_difficulty.get("suggested_fix") or "",
+            }
+        )
+
+    if latest_rehearsal_analysis.get("timing_status") in {"long", "short"}:
+        risks.append(
+            {
+                "type": "overall_timing",
+                "severity": "high" if latest_rehearsal_analysis.get("timing_status") == "long" else "medium",
+                "title": f"Overall pacing is {latest_rehearsal_analysis.get('timing_status')}",
+                "note": latest_rehearsal_analysis.get("timing_note", ""),
+                "recommended_fix": (latest_rehearsal_analysis.get("recommendations") or [""])[0],
+            }
+        )
+
+    largest_overrun = latest_rehearsal_analysis.get("section_timing_summary", {}).get("largest_overrun", {})
+    if largest_overrun:
+        risks.append(
+            {
+                "type": "section_timing",
+                "severity": "high",
+                "title": f"{largest_overrun.get('title', 'Section')} is overrunning",
+                "note": largest_overrun.get("timing_note", ""),
+                "recommended_fix": f"Trim about {largest_overrun.get('delta_label', '0:00')} from this section first.",
+            }
+        )
+
+    if script_summary.get("completed_sections", 0) < script_summary.get("section_count", 0):
+        missing_count = script_summary.get("section_count", 0) - script_summary.get("completed_sections", 0)
+        risks.append(
+            {
+                "type": "content_gap",
+                "severity": "medium",
+                "title": "Some speaking cards are still empty",
+                "note": f"{missing_count} section(s) still need outline, notes, or teleprompter content.",
+                "recommended_fix": "Complete the empty cards before the next full rehearsal.",
+            }
+        )
+    return risks[:4]
+
+
+def _build_qa_prep(mission):
+    title = mission.get("title", "") or "this presentation"
+    focus_goal = mission.get("focus_goal", "")
+    requirements = (mission.get("teacher_requirements", "") or "").lower()
+    active_section = _active_section(mission)
+    evidence_section = next(
+        (
+            item for item in mission.get("script_sections", [])
+            if any(token in (item.get("title", "") + " " + item.get("interaction_goal", "")).lower() for token in ("evidence", "example", "proof"))
+        ),
+        {},
+    )
+
+    likely_questions = [
+        f"What is the one main takeaway you want the audience to remember from {title}?",
+        f"What is the strongest piece of evidence or example supporting {title}?",
+        f"Why does {active_section.get('title', 'your current section')} matter to the overall argument?",
+    ]
+    if "cite" in requirements or "reference" in requirements or "source" in requirements:
+        likely_questions.append("Which source or reference is most important here, and why is it credible?")
+    if focus_goal:
+        likely_questions.append(f"How does this presentation achieve the goal: {focus_goal}?")
+
+    answer_tips = [
+        "Answer first, then justify with one example, then return to the takeaway.",
+        "Keep answers shorter than your main slide explanation unless the teacher asks for detail.",
+        "If you are unsure, restate the question in your own words before answering.",
+    ]
+    if evidence_section:
+        answer_tips.append(
+            f"Re-use one example from {evidence_section.get('title', 'your evidence section')} instead of inventing a new answer under pressure."
+        )
+
+    return {
+        "likely_questions": likely_questions[:4],
+        "answer_framework": "Claim -> Evidence -> Takeaway",
+        "answer_tips": answer_tips[:4],
     }
 
 
@@ -981,7 +1198,6 @@ def _build_next_actions(mission):
 def _build_review(mission):
     sections = mission.get("script_sections", [])
     state = _presentation_state_payload(mission.get("presentation_state", {}), sections)
-    active_section = _active_section(mission)
     difficulty_events = mission.get("difficulty_events", [])
     rehearsal_history = mission.get("rehearsal_history", [])
     latest_difficulty = difficulty_events[-1] if difficulty_events else {}
@@ -1030,6 +1246,13 @@ def _build_review(mission):
             "latest": latest_rehearsal,
             "latest_analysis": latest_rehearsal_analysis,
         },
+        "delivery_risks": _build_delivery_risks(
+            mission,
+            script_summary,
+            latest_difficulty,
+            latest_rehearsal_analysis,
+        ),
+        "qa_prep": _build_qa_prep(mission),
         "coaching_summary": _build_coaching_summary(mission, script_summary, difficulty_events, rehearsal_history),
         "next_actions": _build_next_actions(mission),
         "updated_at": mission.get("updated_at", ""),
@@ -1345,6 +1568,11 @@ def _record_rehearsal(mission, payload):
         "status": "unknown",
         "note": "Set a target duration to compare rehearsal timing.",
     }
+    section_timings = _normalize_section_timings(
+        mission.get("script_sections", []),
+        section_timings=payload.get("section_timings"),
+        total_duration_seconds=actual_seconds,
+    )
     rehearsal_entry = {
         "rehearsal_id": _safe_text(payload.get("rehearsal_id"), max_length=80) or _build_id("rehearsal"),
         "recorded_at": recorded_at,
@@ -1358,6 +1586,7 @@ def _record_rehearsal(mission, payload):
         "transcript_word_count": transcript_word_count,
         "timing_status": pacing_hint["status"],
         "timing_note": pacing_hint["note"],
+        "section_timings": section_timings,
     }
     rehearsal_entry["analysis"] = _build_rehearsal_analysis(mission, rehearsal_entry)
     rehearsal_history = mission.get("rehearsal_history", [])
