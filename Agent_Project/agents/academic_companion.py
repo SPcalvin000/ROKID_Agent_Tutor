@@ -34,6 +34,14 @@ STORE_LOCK = asyncio.Lock()
 CAPABILITY_PRESENTATION = "presentation"
 CAPABILITY_REFLECTION = "reflection_coach"
 CAPABILITY_GUARDIAN = "learning_state_guardian"
+SUPPORTED_EVENT_TYPES = ("text_chat", "state_update", "difficulty_event", "session_review")
+PRESENTATION_OPERATIONS = (
+    "upsert_mission",
+    "extract_intake",
+    "update_script_section",
+    "presentation_control",
+    "record_rehearsal",
+)
 REFLECTION_OPERATIONS = {
     "set_reflection_focus",
     "capture_reflection",
@@ -57,6 +65,46 @@ CAPABILITY_ALIASES = {
     "state_guardian": CAPABILITY_GUARDIAN,
     "study_state": CAPABILITY_GUARDIAN,
     "learning_state_guardian": CAPABILITY_GUARDIAN,
+}
+CAPABILITY_STATE_UPDATE_OPERATIONS = {
+    CAPABILITY_PRESENTATION: PRESENTATION_OPERATIONS,
+    CAPABILITY_REFLECTION: tuple(sorted(REFLECTION_OPERATIONS)),
+    CAPABILITY_GUARDIAN: tuple(sorted(GUARDIAN_OPERATIONS)),
+}
+OPERATION_ALIASES = {
+    CAPABILITY_PRESENTATION: {
+        "brief": "extract_intake",
+        "extract_brief": "extract_intake",
+        "extract_task": "extract_intake",
+        "intake": "extract_intake",
+        "mission_update": "upsert_mission",
+        "set_mission": "upsert_mission",
+        "slide_control": "presentation_control",
+        "teleprompter_control": "presentation_control",
+        "section_update": "update_script_section",
+        "update_section": "update_script_section",
+        "log_rehearsal": "record_rehearsal",
+        "rehearsal": "record_rehearsal",
+    },
+    CAPABILITY_REFLECTION: {
+        "capture": "capture_reflection",
+        "log": "log_reflection",
+        "reflect": "capture_reflection",
+        "reflection": "capture_reflection",
+        "set_focus": "set_reflection_focus",
+        "set_theme": "set_reflection_focus",
+        "next_step": "plan_next_step",
+        "plan": "plan_next_step",
+    },
+    CAPABILITY_GUARDIAN: {
+        "context": "set_learning_context",
+        "set_context": "set_learning_context",
+        "state": "record_learning_state",
+        "snapshot": "record_learning_state",
+        "state_snapshot": "record_learning_state",
+        "focus_signal": "record_focus_signal",
+        "signal": "record_focus_signal",
+    },
 }
 
 
@@ -120,6 +168,48 @@ def _infer_capability_from_message(message):
     return CAPABILITY_PRESENTATION
 
 
+def _first_present_value(payload, keys):
+    payload = _ensure_payload_dict(payload)
+    for key in keys:
+        value = payload.get(key)
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        return value
+    return None
+
+
+def _canonical_operation(capability, operation):
+    normalized = _safe_text(operation, max_length=80).lower()
+    if not normalized:
+        if capability == CAPABILITY_REFLECTION:
+            return "capture_reflection"
+        if capability == CAPABILITY_GUARDIAN:
+            return "record_learning_state"
+        return "upsert_mission"
+    aliases = OPERATION_ALIASES.get(capability, {})
+    return aliases.get(normalized, normalized)
+
+
+def _interface_contract(capability, event_type, operation=""):
+    return {
+        "capability": capability,
+        "event_type": event_type,
+        "operation": operation or "",
+        "supported_event_types": list(SUPPORTED_EVENT_TYPES),
+        "supported_state_update_operations": list(CAPABILITY_STATE_UPDATE_OPERATIONS.get(capability, ())),
+    }
+
+
+def _routing_metadata(capability, event_type, operation=""):
+    return {
+        "capability": capability,
+        "event_type": event_type,
+        "operation": operation or "",
+    }
+
+
 def _resolve_capability(payload, event_type=""):
     payload = _ensure_payload_dict(payload)
     explicit = (
@@ -138,11 +228,263 @@ def _resolve_capability(payload, event_type=""):
         return CAPABILITY_REFLECTION
     if operation in GUARDIAN_OPERATIONS:
         return CAPABILITY_GUARDIAN
+    for candidate_capability, aliases in OPERATION_ALIASES.items():
+        if operation in aliases:
+            return candidate_capability
 
     if event_type == "text_chat":
         return _infer_capability_from_message(payload.get("message") or payload.get("text"))
 
     return CAPABILITY_PRESENTATION
+
+
+def _normalize_presentation_payload(payload, event_type):
+    payload = copy.deepcopy(_ensure_payload_dict(payload))
+    if event_type == "text_chat":
+        payload["message"] = _safe_text(
+            _first_present_value(payload, ("message", "text", "prompt")),
+            max_length=2000,
+            preserve_lines=True,
+        )
+        return payload
+
+    if event_type == "state_update":
+        operation = _canonical_operation(CAPABILITY_PRESENTATION, payload.get("operation"))
+        payload["operation"] = operation
+        if operation == "extract_intake":
+            payload["task_text"] = _safe_text(
+                _first_present_value(payload, ("task_text", "assignment_text", "brief_text", "prompt_text")),
+                max_length=4000,
+                preserve_lines=True,
+            )
+        elif operation == "presentation_control":
+            payload["action"] = _safe_text(
+                _first_present_value(payload, ("action", "command", "control_action")),
+                max_length=40,
+            )
+        elif operation == "record_rehearsal":
+            transcript_source = _first_present_value(payload, ("transcript_excerpt", "transcript", "transcript_text"))
+            if transcript_source is not None:
+                payload["transcript_excerpt"] = _safe_text(transcript_source, max_length=4000, preserve_lines=True)
+            section_timings = _first_present_value(payload, ("section_timings", "section_times", "timings_by_section"))
+            if section_timings is not None:
+                payload["section_timings"] = section_timings
+        elif operation == "update_script_section":
+            section_id = _first_present_value(payload, ("section_id", "card_id", "slide_id"))
+            if section_id is not None:
+                payload["section_id"] = _safe_text(section_id, max_length=80)
+            slide_index = _first_present_value(payload, ("slide_index", "section_index"))
+            if slide_index is not None:
+                payload["slide_index"] = slide_index
+        return payload
+
+    if event_type == "difficulty_event":
+        payload["challenge"] = _safe_text(
+            _first_present_value(payload, ("challenge", "difficulty", "blocker", "obstacle")),
+            max_length=180,
+        )
+        payload["context"] = _safe_text(
+            _first_present_value(payload, ("context", "note", "details")),
+            max_length=1200,
+            preserve_lines=True,
+        )
+        return payload
+
+    if event_type == "session_review":
+        payload["review_scope"] = _safe_text(
+            _first_present_value(payload, ("review_scope", "scope")),
+            max_length=80,
+        ) or "mission"
+    return payload
+
+
+def _normalize_reflection_payload(payload, event_type):
+    payload = copy.deepcopy(_ensure_payload_dict(payload))
+    if event_type == "text_chat":
+        payload["message"] = _safe_text(
+            _first_present_value(payload, ("message", "text", "prompt")),
+            max_length=2000,
+            preserve_lines=True,
+        )
+        return payload
+
+    if event_type == "state_update":
+        operation = _canonical_operation(CAPABILITY_REFLECTION, payload.get("operation"))
+        payload["operation"] = operation
+        if operation == "set_reflection_focus":
+            payload["focus_theme"] = _safe_text(
+                _first_present_value(payload, ("focus_theme", "theme", "focus", "current_focus")),
+                max_length=180,
+            )
+            payload["current_course"] = _safe_text(
+                _first_present_value(payload, ("current_course", "course", "module", "subject")),
+                max_length=180,
+            )
+            payload["target_habit"] = _safe_text(
+                _first_present_value(payload, ("target_habit", "habit", "target")),
+                max_length=180,
+            )
+        elif operation in {"capture_reflection", "log_reflection"}:
+            payload["what_happened"] = _safe_text(
+                _first_present_value(payload, ("what_happened", "summary", "session_summary")),
+                max_length=1800,
+                preserve_lines=True,
+            )
+            payload["what_worked"] = _safe_text(
+                _first_present_value(payload, ("what_worked", "worked", "win", "wins")),
+                max_length=1400,
+                preserve_lines=True,
+            )
+            payload["what_was_hard"] = _safe_text(
+                _first_present_value(payload, ("what_was_hard", "blocker", "obstacle", "struggle", "challenge")),
+                max_length=1400,
+                preserve_lines=True,
+            )
+            payload["lesson"] = _safe_text(
+                _first_present_value(payload, ("lesson", "insight", "what_i_learned")),
+                max_length=1400,
+                preserve_lines=True,
+            )
+            payload["next_step"] = _safe_text(
+                _first_present_value(payload, ("next_step", "next_action", "action_commitment")),
+                max_length=600,
+                preserve_lines=True,
+            )
+        elif operation == "plan_next_step":
+            steps = _first_present_value(payload, ("steps", "actions", "next_actions"))
+            if steps is not None:
+                payload["steps"] = steps
+            else:
+                payload["next_step"] = _safe_text(
+                    _first_present_value(payload, ("next_step", "plan", "next_action")),
+                    max_length=1200,
+                    preserve_lines=True,
+                )
+        return payload
+
+    if event_type == "difficulty_event":
+        payload["challenge"] = _safe_text(
+            _first_present_value(payload, ("challenge", "difficulty", "blocker", "obstacle")),
+            max_length=180,
+        )
+        payload["context"] = _safe_text(
+            _first_present_value(payload, ("context", "note", "details")),
+            max_length=1200,
+            preserve_lines=True,
+        )
+        return payload
+
+    if event_type == "session_review":
+        payload["review_scope"] = _safe_text(
+            _first_present_value(payload, ("review_scope", "scope")),
+            max_length=80,
+        ) or "reflection"
+    return payload
+
+
+def _normalize_guardian_payload(payload, event_type):
+    payload = copy.deepcopy(_ensure_payload_dict(payload))
+    if event_type == "text_chat":
+        payload["message"] = _safe_text(
+            _first_present_value(payload, ("message", "text", "prompt")),
+            max_length=2000,
+            preserve_lines=True,
+        )
+        return payload
+
+    if event_type == "state_update":
+        operation = _canonical_operation(CAPABILITY_GUARDIAN, payload.get("operation"))
+        payload["operation"] = operation
+        if operation == "set_learning_context":
+            payload["current_task"] = _safe_text(
+                _first_present_value(payload, ("current_task", "task", "study_task", "current_focus_task")),
+                max_length=220,
+            )
+            payload["session_goal"] = _safe_text(
+                _first_present_value(payload, ("session_goal", "goal", "intended_outcome")),
+                max_length=320,
+            )
+            payload["current_course"] = _safe_text(
+                _first_present_value(payload, ("current_course", "course", "module", "subject")),
+                max_length=180,
+            )
+            payload["environment"] = _safe_text(
+                _first_present_value(payload, ("environment", "location", "study_environment")),
+                max_length=180,
+            )
+        elif operation == "record_learning_state":
+            payload["current_task"] = _safe_text(
+                _first_present_value(payload, ("current_task", "task", "study_task")),
+                max_length=220,
+            )
+            payload["progress_status"] = _safe_text(
+                _first_present_value(payload, ("progress_status", "progress", "status")),
+                max_length=180,
+            )
+            payload["distraction"] = _safe_text(
+                _first_present_value(payload, ("distraction", "blocker", "obstacle")),
+                max_length=240,
+            )
+            payload["support_needed"] = _safe_text(
+                _first_present_value(payload, ("support_needed", "help_needed", "support")),
+                max_length=320,
+                preserve_lines=True,
+            )
+            payload["note"] = _safe_text(
+                _first_present_value(payload, ("note", "context", "details")),
+                max_length=1200,
+                preserve_lines=True,
+            )
+            for field, aliases in {
+                "focus_level": ("focus_level", "focus", "attention_level"),
+                "energy_level": ("energy_level", "energy"),
+                "stress_level": ("stress_level", "stress", "pressure_level"),
+                "comprehension_level": ("comprehension_level", "comprehension", "clarity_level"),
+            }.items():
+                value = _first_present_value(payload, aliases)
+                if value is not None:
+                    payload[field] = value
+        elif operation == "record_focus_signal":
+            payload["signal_type"] = _safe_text(
+                _first_present_value(payload, ("signal_type", "challenge", "category", "signal")),
+                max_length=180,
+            )
+            payload["note"] = _safe_text(
+                _first_present_value(payload, ("note", "context", "why", "details")),
+                max_length=1200,
+                preserve_lines=True,
+            )
+        return payload
+
+    if event_type == "difficulty_event":
+        payload["challenge"] = _safe_text(
+            _first_present_value(payload, ("challenge", "signal_type", "difficulty", "blocker")),
+            max_length=180,
+        )
+        payload["context"] = _safe_text(
+            _first_present_value(payload, ("context", "note", "details")),
+            max_length=1200,
+            preserve_lines=True,
+        )
+        return payload
+
+    if event_type == "session_review":
+        payload["review_scope"] = _safe_text(
+            _first_present_value(payload, ("review_scope", "scope")),
+            max_length=80,
+        ) or "learning_state"
+    return payload
+
+
+def _normalize_request_payload(payload, event_type):
+    safe_payload = copy.deepcopy(_ensure_payload_dict(payload))
+    capability = _resolve_capability(safe_payload, event_type=event_type)
+    safe_payload["capability"] = capability
+    if capability == CAPABILITY_REFLECTION:
+        return _normalize_reflection_payload(safe_payload, event_type)
+    if capability == CAPABILITY_GUARDIAN:
+        return _normalize_guardian_payload(safe_payload, event_type)
+    return _normalize_presentation_payload(safe_payload, event_type)
 
 
 def _slugify(value, fallback):
@@ -2749,6 +3091,7 @@ def _build_capability_chat_reply(message, mission, capability):
 async def _handle_text_chat(session_id, payload):
     message = _safe_text(payload.get("message") or payload.get("text"), max_length=2000, preserve_lines=True)
     capability = _resolve_capability(payload, event_type="text_chat")
+    contract = _interface_contract(capability, "text_chat")
     async with STORE_LOCK:
         store = _read_store()
         mission = _resolve_mission(store, session_id, payload, create_if_missing=True)
@@ -2760,6 +3103,7 @@ async def _handle_text_chat(session_id, payload):
                     "role": "user",
                     "message": message,
                     "recorded_at": recorded_at,
+                    "capability": capability,
                 },
             )
         reply = _build_capability_chat_reply(message, mission, capability)
@@ -2782,6 +3126,8 @@ async def _handle_text_chat(session_id, payload):
                 "mission_id": mission["mission_id"],
                 "event_type": "text_chat",
                 "capability": capability,
+                "routing": _routing_metadata(capability, "text_chat"),
+                "interface_contract": contract,
                 "reply": reply,
                 "received_message": message,
                 "review": _build_review(mission),
@@ -2792,6 +3138,7 @@ async def _handle_text_chat(session_id, payload):
 async def _handle_state_update(session_id, payload):
     operation = _safe_text(payload.get("operation"), max_length=40).lower() or "upsert_mission"
     capability = _resolve_capability(payload, event_type="state_update")
+    contract = _interface_contract(capability, "state_update", operation=operation)
     async with STORE_LOCK:
         store = _read_store()
         mission = _resolve_mission(store, session_id, payload, create_if_missing=True)
@@ -2821,6 +3168,8 @@ async def _handle_state_update(session_id, payload):
                         "mission_id": mission["mission_id"],
                         "event_type": "state_update",
                         "capability": capability,
+                        "routing": _routing_metadata(capability, "state_update", "extract_intake"),
+                        "interface_contract": _interface_contract(capability, "state_update", "extract_intake"),
                         "operation": "extract_intake",
                         "result": result,
                         "mission": _mission_payload(mission),
@@ -2834,13 +3183,15 @@ async def _handle_state_update(session_id, payload):
                     "mission_id": mission["mission_id"],
                     "event_type": "state_update",
                     "capability": capability,
+                    "routing": _routing_metadata(capability, "state_update", "extract_intake"),
+                    "interface_contract": _interface_contract(capability, "state_update", "extract_intake"),
                     "operation": "extract_intake",
                     "result": result,
                     "mission": _mission_payload(mission),
                     "review": _build_review(mission),
                 },
             }
-        if operation == "presentation_control":
+        elif operation == "presentation_control":
             result = _apply_control_action(mission, payload)
         elif operation == "record_rehearsal":
             rehearsal = _record_rehearsal(mission, payload)
@@ -2863,6 +3214,8 @@ async def _handle_state_update(session_id, payload):
                 "mission_id": mission["mission_id"],
                 "event_type": "state_update",
                 "capability": capability,
+                "routing": _routing_metadata(capability, "state_update", result.get("operation", operation)),
+                "interface_contract": contract,
                 "operation": result.get("operation", operation),
                 "result": result,
                 "mission": _mission_payload(mission),
@@ -2873,6 +3226,7 @@ async def _handle_state_update(session_id, payload):
 
 async def _handle_difficulty_event(session_id, payload):
     capability = _resolve_capability(payload, event_type="difficulty_event")
+    contract = _interface_contract(capability, "difficulty_event")
     async with STORE_LOCK:
         store = _read_store()
         mission = _resolve_mission(store, session_id, payload, create_if_missing=True)
@@ -2920,6 +3274,8 @@ async def _handle_difficulty_event(session_id, payload):
                 "mission_id": mission["mission_id"],
                 "event_type": "difficulty_event",
                 "capability": capability,
+                "routing": _routing_metadata(capability, "difficulty_event"),
+                "interface_contract": contract,
                 "difficulty_event": difficulty_entry,
                 "difficulty_count": len(difficulty_events),
                 "review": _build_review(mission),
@@ -2930,6 +3286,7 @@ async def _handle_difficulty_event(session_id, payload):
 async def _handle_session_review(session_id, payload):
     include_history = _safe_bool(payload.get("include_history"), default=False)
     capability = _resolve_capability(payload, event_type="session_review")
+    contract = _interface_contract(capability, "session_review")
     async with STORE_LOCK:
         store = _read_store()
         mission = _resolve_mission(store, session_id, payload, create_if_missing=True)
@@ -2941,6 +3298,8 @@ async def _handle_session_review(session_id, payload):
                 "mission_id": mission["mission_id"],
                 "event_type": "session_review",
                 "capability": capability,
+                "routing": _routing_metadata(capability, "session_review"),
+                "interface_contract": contract,
                 "review_scope": _safe_text(payload.get("review_scope"), max_length=80) or "mission",
                 "review": review,
                 "mission": _mission_payload(mission),
@@ -2964,16 +3323,17 @@ async def _handle_session_review(session_id, payload):
 async def handle_request(event_type, session_id, payload):
     safe_payload = _ensure_payload_dict(payload)
     safe_session_id = str(session_id or "anonymous")
+    normalized_payload = _normalize_request_payload(safe_payload, event_type)
 
     try:
         if event_type == "text_chat":
-            return await _handle_text_chat(safe_session_id, safe_payload)
+            return await _handle_text_chat(safe_session_id, normalized_payload)
         if event_type == "state_update":
-            return await _handle_state_update(safe_session_id, safe_payload)
+            return await _handle_state_update(safe_session_id, normalized_payload)
         if event_type == "difficulty_event":
-            return await _handle_difficulty_event(safe_session_id, safe_payload)
+            return await _handle_difficulty_event(safe_session_id, normalized_payload)
         if event_type == "session_review":
-            return await _handle_session_review(safe_session_id, safe_payload)
+            return await _handle_session_review(safe_session_id, normalized_payload)
     except Exception as exc:
         return {
             "status": "error",
