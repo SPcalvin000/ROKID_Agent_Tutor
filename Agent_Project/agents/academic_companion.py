@@ -31,6 +31,33 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 STORE_PATH = os.path.join(DATA_DIR, "academic_companion_store.json")
 STORE_LOCK = asyncio.Lock()
+CAPABILITY_PRESENTATION = "presentation"
+CAPABILITY_REFLECTION = "reflection_coach"
+CAPABILITY_GUARDIAN = "learning_state_guardian"
+REFLECTION_OPERATIONS = {
+    "set_reflection_focus",
+    "capture_reflection",
+    "log_reflection",
+    "plan_next_step",
+}
+GUARDIAN_OPERATIONS = {
+    "set_learning_context",
+    "record_learning_state",
+    "record_focus_signal",
+}
+CAPABILITY_ALIASES = {
+    "academic_companion": CAPABILITY_PRESENTATION,
+    "academic_presentation": CAPABILITY_PRESENTATION,
+    "learning_reflection": CAPABILITY_REFLECTION,
+    "learning_state": CAPABILITY_GUARDIAN,
+    "presentation": CAPABILITY_PRESENTATION,
+    "presentation_companion": CAPABILITY_PRESENTATION,
+    "reflection": CAPABILITY_REFLECTION,
+    "reflection_coach": CAPABILITY_REFLECTION,
+    "state_guardian": CAPABILITY_GUARDIAN,
+    "study_state": CAPABILITY_GUARDIAN,
+    "learning_state_guardian": CAPABILITY_GUARDIAN,
+}
 
 
 def _now_iso():
@@ -41,6 +68,11 @@ def _ensure_payload_dict(payload):
     if isinstance(payload, dict):
         return payload
     return {}
+
+
+def _normalize_capability(value):
+    normalized = _safe_text(value, max_length=80).lower()
+    return CAPABILITY_ALIASES.get(normalized, "")
 
 
 def _safe_text(value, max_length=240, preserve_lines=False):
@@ -77,6 +109,40 @@ def _safe_bool(value, default=False):
         if lowered in {"false", "0", "no", "n", "off"}:
             return False
     return default
+
+
+def _infer_capability_from_message(message):
+    lowered = _safe_text(message, max_length=600, preserve_lines=True).lower()
+    if any(token in lowered for token in ("reflection", "reflect", "what did i learn", "lesson learned", "journal")):
+        return CAPABILITY_REFLECTION
+    if any(token in lowered for token in ("focus", "energy", "distracted", "burnout", "overwhelmed", "state", "tired")):
+        return CAPABILITY_GUARDIAN
+    return CAPABILITY_PRESENTATION
+
+
+def _resolve_capability(payload, event_type=""):
+    payload = _ensure_payload_dict(payload)
+    explicit = (
+        payload.get("capability")
+        or payload.get("module")
+        or payload.get("feature")
+        or payload.get("skill_area")
+        or payload.get("companion_mode")
+    )
+    capability = _normalize_capability(explicit)
+    if capability:
+        return capability
+
+    operation = _safe_text(payload.get("operation"), max_length=80).lower()
+    if operation in REFLECTION_OPERATIONS:
+        return CAPABILITY_REFLECTION
+    if operation in GUARDIAN_OPERATIONS:
+        return CAPABILITY_GUARDIAN
+
+    if event_type == "text_chat":
+        return _infer_capability_from_message(payload.get("message") or payload.get("text"))
+
+    return CAPABILITY_PRESENTATION
 
 
 def _slugify(value, fallback):
@@ -1573,10 +1639,85 @@ def _normalize_presentation_state(sections, existing=None, incoming=None):
     }
 
 
+def _default_reflection_state(created_at=""):
+    timestamp = created_at or _now_iso()
+    return {
+        "focus_theme": "",
+        "current_course": "",
+        "target_habit": "",
+        "latest_reflection": {},
+        "reflection_history": [],
+        "action_commitments": [],
+        "wins": [],
+        "updated_at": timestamp,
+    }
+
+
+def _default_learning_state_guardian(created_at=""):
+    timestamp = created_at or _now_iso()
+    return {
+        "current_task": "",
+        "session_goal": "",
+        "current_course": "",
+        "environment": "",
+        "latest_state": {},
+        "state_history": [],
+        "focus_signals": [],
+        "risk_flags": [],
+        "updated_at": timestamp,
+    }
+
+
+def _ensure_mission_extensions(mission):
+    created_at = _safe_text((mission or {}).get("created_at"), max_length=40) or _now_iso()
+    reflection_state = mission.get("reflection_coach")
+    if not isinstance(reflection_state, dict):
+        reflection_state = _default_reflection_state(created_at)
+    else:
+        defaults = _default_reflection_state(created_at)
+        for key, value in defaults.items():
+            reflection_state.setdefault(key, copy.deepcopy(value))
+    reflection_state["reflection_history"] = [
+        item for item in reflection_state.get("reflection_history", []) if isinstance(item, dict)
+    ][-MAX_HISTORY:]
+    reflection_state["action_commitments"] = [
+        _safe_text(item, max_length=280, preserve_lines=True)
+        for item in reflection_state.get("action_commitments", [])
+        if _safe_text(item, max_length=280, preserve_lines=True)
+    ][-MAX_HISTORY:]
+    reflection_state["wins"] = [
+        _safe_text(item, max_length=280, preserve_lines=True)
+        for item in reflection_state.get("wins", [])
+        if _safe_text(item, max_length=280, preserve_lines=True)
+    ][-MAX_HISTORY:]
+    mission["reflection_coach"] = reflection_state
+
+    guardian_state = mission.get("learning_state_guardian")
+    if not isinstance(guardian_state, dict):
+        guardian_state = _default_learning_state_guardian(created_at)
+    else:
+        defaults = _default_learning_state_guardian(created_at)
+        for key, value in defaults.items():
+            guardian_state.setdefault(key, copy.deepcopy(value))
+    guardian_state["state_history"] = [item for item in guardian_state.get("state_history", []) if isinstance(item, dict)][
+        -MAX_HISTORY:
+    ]
+    guardian_state["focus_signals"] = [item for item in guardian_state.get("focus_signals", []) if isinstance(item, dict)][
+        -MAX_HISTORY:
+    ]
+    guardian_state["risk_flags"] = [
+        _safe_text(item, max_length=220)
+        for item in guardian_state.get("risk_flags", [])
+        if _safe_text(item, max_length=220)
+    ][-8:]
+    mission["learning_state_guardian"] = guardian_state
+    return mission
+
+
 def _build_default_mission(session_id, mission_id):
     created_at = _now_iso()
     script_sections = _default_sections(0.0)
-    return {
+    mission = {
         "mission_id": mission_id,
         "session_id": session_id,
         "title": "",
@@ -1597,6 +1738,9 @@ def _build_default_mission(session_id, mission_id):
         "created_at": created_at,
         "updated_at": created_at,
     }
+    mission["reflection_coach"] = _default_reflection_state(created_at)
+    mission["learning_state_guardian"] = _default_learning_state_guardian(created_at)
+    return mission
 
 
 def _resolve_mission(store, session_id, payload, create_if_missing=True):
@@ -1606,6 +1750,7 @@ def _resolve_mission(store, session_id, payload, create_if_missing=True):
         mission = _build_default_mission(session_id, mission_id)
     if mission is not None:
         mission["session_id"] = session_id
+        mission = _ensure_mission_extensions(mission)
     return mission
 
 
@@ -1624,6 +1769,11 @@ def _build_next_actions(mission):
     state = mission.get("presentation_state", {})
     difficulties = mission.get("difficulty_events", [])
     rehearsals = mission.get("rehearsal_history", [])
+    reflection_state = _ensure_payload_dict(mission.get("reflection_coach"))
+    guardian_state = _ensure_payload_dict(mission.get("learning_state_guardian"))
+    reflection_history = reflection_state.get("reflection_history", [])
+    guardian_latest = guardian_state.get("latest_state", {}) if isinstance(guardian_state.get("latest_state"), dict) else {}
+    guardian_risks = guardian_state.get("risk_flags", [])
 
     if not mission.get("title") and not mission.get("task_description"):
         actions.append("Capture the presentation brief so the companion can anchor feedback to one task.")
@@ -1639,9 +1789,128 @@ def _build_next_actions(mission):
         actions.append("Move the mission into a rehearsal-ready outline with an opening, evidence, and closing.")
     if state.get("phase") == "rehearsing" and not difficulties:
         actions.append("Trim one section or add one transition cue to improve delivery flow.")
+    if reflection_history and not reflection_state.get("action_commitments"):
+        actions.append("Turn the latest reflection into one specific next-step commitment for the next study block.")
+    if guardian_latest and guardian_risks:
+        actions.append(f"Reduce the top study-state risk first: {guardian_risks[0]}.")
+    if guardian_latest and not guardian_state.get("focus_signals"):
+        actions.append("Log one focus signal or distraction pattern so the guardian can catch repeated friction.")
     if not actions:
         actions.append("Keep rehearsing the current section and tighten transitions between slides.")
     return actions[:4]
+
+
+def _build_reflection_review(mission):
+    state = _ensure_payload_dict(mission.get("reflection_coach"))
+    history = [item for item in state.get("reflection_history", []) if isinstance(item, dict)]
+    latest = state.get("latest_reflection", {}) if isinstance(state.get("latest_reflection"), dict) else {}
+    if not latest and history:
+        latest = history[-1]
+
+    theme_counter = Counter()
+    for item in history[-6:]:
+        for field in ("focus_theme", "lesson", "what_was_hard", "next_step"):
+            words = re.findall(r"[a-zA-Z]{4,}", str(item.get(field, "")).lower())
+            for word in words[:4]:
+                if word not in TRANSCRIPT_STOPWORDS:
+                    theme_counter[word] += 1
+
+    commitments = state.get("action_commitments", [])[-3:]
+    wins = state.get("wins", [])[-3:]
+    coach_message = "Capture one short reflection after the next study block so patterns become easier to coach."
+    if latest.get("what_was_hard"):
+        coach_message = (
+            f"The current reflection theme is {latest.get('what_was_hard')}. "
+            f"Turn it into one smaller next action: {latest.get('next_step') or 'define the first 10-minute step.'}"
+        )
+    elif commitments:
+        coach_message = f"Your clearest next commitment is: {commitments[0]}"
+    elif wins:
+        coach_message = f"Anchor the next reflection in what already worked: {wins[0]}"
+
+    return {
+        "focus_theme": state.get("focus_theme", ""),
+        "current_course": state.get("current_course", ""),
+        "target_habit": state.get("target_habit", ""),
+        "reflection_count": len(history),
+        "latest_reflection": latest,
+        "recent_commitments": commitments,
+        "recent_wins": wins,
+        "pattern_keywords": [item for item, _ in theme_counter.most_common(5)],
+        "coach_message": coach_message,
+        "updated_at": state.get("updated_at", ""),
+    }
+
+
+def _guardian_risk_flags_from_state(latest_state, focus_signals):
+    latest_state = latest_state if isinstance(latest_state, dict) else {}
+    focus_signals = focus_signals if isinstance(focus_signals, list) else []
+    risk_flags = []
+    if _safe_int(latest_state.get("focus_level"), default=0) and _safe_int(latest_state.get("focus_level"), default=0) <= 2:
+        risk_flags.append("Low focus signal")
+    if _safe_int(latest_state.get("energy_level"), default=0) and _safe_int(latest_state.get("energy_level"), default=0) <= 2:
+        risk_flags.append("Low energy signal")
+    if _safe_int(latest_state.get("stress_level"), default=0) >= 4:
+        risk_flags.append("High stress signal")
+    if latest_state.get("distraction"):
+        risk_flags.append("Active distraction noted")
+    recent_unresolved = [
+        item
+        for item in focus_signals[-4:]
+        if isinstance(item, dict) and not _safe_bool(item.get("resolved"), default=False)
+    ]
+    if recent_unresolved:
+        risk_flags.append("Unresolved focus blockers remain")
+    deduped = []
+    for item in risk_flags:
+        if item not in deduped:
+            deduped.append(item)
+    return deduped[:5]
+
+
+def _build_learning_state_review(mission):
+    state = _ensure_payload_dict(mission.get("learning_state_guardian"))
+    history = [item for item in state.get("state_history", []) if isinstance(item, dict)]
+    signals = [item for item in state.get("focus_signals", []) if isinstance(item, dict)]
+    latest_state = state.get("latest_state", {}) if isinstance(state.get("latest_state"), dict) else {}
+    if not latest_state and history:
+        latest_state = history[-1]
+
+    recent_history = history[-4:]
+    averages = {
+        "focus_level": round(sum(_safe_int(item.get("focus_level"), default=0) for item in recent_history) / len(recent_history), 1)
+        if recent_history
+        else 0.0,
+        "energy_level": round(sum(_safe_int(item.get("energy_level"), default=0) for item in recent_history) / len(recent_history), 1)
+        if recent_history
+        else 0.0,
+        "stress_level": round(sum(_safe_int(item.get("stress_level"), default=0) for item in recent_history) / len(recent_history), 1)
+        if recent_history
+        else 0.0,
+    }
+    risk_flags = state.get("risk_flags", []) or _guardian_risk_flags_from_state(latest_state, signals)
+    coach_message = "Record one state snapshot with focus, energy, and stress so the guardian can spot trends."
+    if risk_flags:
+        coach_message = f"The main study-state risk is {risk_flags[0]}. Reduce one friction point before the next work block."
+    elif latest_state.get("current_task") or state.get("current_task"):
+        coach_message = (
+            f"Stay with {latest_state.get('current_task') or state.get('current_task')} until one visible checkpoint is finished, "
+            "then log the next state snapshot."
+        )
+
+    return {
+        "current_task": state.get("current_task", ""),
+        "session_goal": state.get("session_goal", ""),
+        "current_course": state.get("current_course", ""),
+        "environment": state.get("environment", ""),
+        "latest_state": latest_state,
+        "state_history_count": len(history),
+        "recent_focus_signals": signals[-4:],
+        "risk_flags": risk_flags,
+        "trend_averages": averages,
+        "coach_message": coach_message,
+        "updated_at": state.get("updated_at", ""),
+    }
 
 
 def _build_review(mission):
@@ -1715,6 +1984,8 @@ def _build_review(mission):
             latest_rehearsal_analysis,
         ),
         "qa_prep": _build_qa_prep(mission),
+        "reflection_coach": _build_reflection_review(mission),
+        "learning_state_guardian": _build_learning_state_review(mission),
         "coaching_summary": _build_coaching_summary(mission, script_summary, difficulty_events, rehearsal_history),
         "next_actions": _build_next_actions(mission),
         "updated_at": mission.get("updated_at", ""),
@@ -1722,6 +1993,8 @@ def _build_review(mission):
 
 
 def _mission_payload(mission):
+    reflection_state = _ensure_payload_dict(mission.get("reflection_coach"))
+    guardian_state = _ensure_payload_dict(mission.get("learning_state_guardian"))
     return {
         "mission_id": mission.get("mission_id", ""),
         "session_id": mission.get("session_id", ""),
@@ -1747,6 +2020,25 @@ def _mission_payload(mission):
         "difficulty_events": copy.deepcopy(mission.get("difficulty_events", [])[-6:]),
         "rehearsal_history": copy.deepcopy(mission.get("rehearsal_history", [])[-6:]),
         "chat_history": copy.deepcopy(mission.get("chat_history", [])[-10:]),
+        "reflection_coach": {
+            "focus_theme": reflection_state.get("focus_theme", ""),
+            "current_course": reflection_state.get("current_course", ""),
+            "target_habit": reflection_state.get("target_habit", ""),
+            "latest_reflection": copy.deepcopy(reflection_state.get("latest_reflection", {})),
+            "recent_commitments": copy.deepcopy(reflection_state.get("action_commitments", [])[-5:]),
+            "recent_wins": copy.deepcopy(reflection_state.get("wins", [])[-5:]),
+            "updated_at": reflection_state.get("updated_at", ""),
+        },
+        "learning_state_guardian": {
+            "current_task": guardian_state.get("current_task", ""),
+            "session_goal": guardian_state.get("session_goal", ""),
+            "current_course": guardian_state.get("current_course", ""),
+            "environment": guardian_state.get("environment", ""),
+            "latest_state": copy.deepcopy(guardian_state.get("latest_state", {})),
+            "recent_focus_signals": copy.deepcopy(guardian_state.get("focus_signals", [])[-5:]),
+            "risk_flags": copy.deepcopy(guardian_state.get("risk_flags", [])[-5:]),
+            "updated_at": guardian_state.get("updated_at", ""),
+        },
         "created_at": mission.get("created_at", ""),
         "updated_at": mission.get("updated_at", ""),
     }
@@ -2071,6 +2363,268 @@ def _record_rehearsal(mission, payload):
     return rehearsal_entry
 
 
+def _apply_reflection_update(mission, payload, operation):
+    state = _ensure_payload_dict(mission.get("reflection_coach"))
+    recorded_at = _now_iso()
+
+    if operation == "set_reflection_focus":
+        state["focus_theme"] = _safe_text(payload.get("focus_theme"), max_length=180) or state.get("focus_theme", "")
+        state["current_course"] = _safe_text(payload.get("current_course") or payload.get("course"), max_length=180) or state.get(
+            "current_course",
+            "",
+        )
+        state["target_habit"] = _safe_text(payload.get("target_habit"), max_length=180) or state.get("target_habit", "")
+        state["updated_at"] = recorded_at
+        mission["reflection_coach"] = state
+        return {
+            "operation": operation,
+            "focus_theme": state.get("focus_theme", ""),
+            "current_course": state.get("current_course", ""),
+            "target_habit": state.get("target_habit", ""),
+        }
+
+    if operation in {"capture_reflection", "log_reflection"}:
+        reflection_entry = {
+            "reflection_id": _safe_text(payload.get("reflection_id"), max_length=80) or _build_id("reflection"),
+            "recorded_at": recorded_at,
+            "focus_theme": _safe_text(payload.get("focus_theme"), max_length=180) or state.get("focus_theme", ""),
+            "what_happened": _safe_text(payload.get("what_happened"), max_length=1800, preserve_lines=True),
+            "what_worked": _safe_text(payload.get("what_worked"), max_length=1400, preserve_lines=True),
+            "what_was_hard": _safe_text(
+                payload.get("what_was_hard") or payload.get("blocker") or payload.get("challenge"),
+                max_length=1400,
+                preserve_lines=True,
+            ),
+            "lesson": _safe_text(
+                payload.get("lesson") or payload.get("insight") or payload.get("what_i_learned"),
+                max_length=1400,
+                preserve_lines=True,
+            ),
+            "next_step": _safe_text(payload.get("next_step"), max_length=600, preserve_lines=True),
+            "energy_level": max(0, min(5, _safe_int(payload.get("energy_level"), default=0))),
+            "confidence_level": max(0, min(5, _safe_int(payload.get("confidence_level"), default=0))),
+        }
+        history = state.get("reflection_history", [])
+        _append_limited(history, reflection_entry)
+        state["reflection_history"] = history
+        state["latest_reflection"] = reflection_entry
+        if reflection_entry["focus_theme"]:
+            state["focus_theme"] = reflection_entry["focus_theme"]
+        if reflection_entry["next_step"]:
+            commitments = state.get("action_commitments", [])
+            _append_limited(commitments, reflection_entry["next_step"])
+            state["action_commitments"] = commitments
+        if reflection_entry["what_worked"]:
+            wins = state.get("wins", [])
+            _append_limited(wins, reflection_entry["what_worked"])
+            state["wins"] = wins
+        state["updated_at"] = recorded_at
+        mission["reflection_coach"] = state
+        return {
+            "operation": operation,
+            "reflection_entry": reflection_entry,
+            "reflection_count": len(history),
+        }
+
+    if operation == "plan_next_step":
+        commitments = state.get("action_commitments", [])
+        steps = payload.get("steps")
+        normalized_steps = []
+        if isinstance(steps, list):
+            normalized_steps = [_safe_text(item, max_length=280, preserve_lines=True) for item in steps]
+        else:
+            candidate = _safe_text(payload.get("next_step") or payload.get("plan"), max_length=1200, preserve_lines=True)
+            if candidate:
+                normalized_steps = [_safe_text(item, max_length=280, preserve_lines=True) for item in re.split(r"[\n;]+", candidate)]
+        normalized_steps = [item for item in normalized_steps if item]
+        for step in normalized_steps:
+            _append_limited(commitments, step)
+        state["action_commitments"] = commitments
+        state["updated_at"] = recorded_at
+        mission["reflection_coach"] = state
+        return {
+            "operation": operation,
+            "planned_steps": normalized_steps,
+            "recent_commitments": commitments[-5:],
+        }
+
+    raise ValueError(f"Unsupported reflection operation: {operation}")
+
+
+def _apply_learning_state_update(mission, payload, operation):
+    state = _ensure_payload_dict(mission.get("learning_state_guardian"))
+    recorded_at = _now_iso()
+
+    if operation == "set_learning_context":
+        state["current_task"] = _safe_text(payload.get("current_task") or payload.get("task"), max_length=220) or state.get(
+            "current_task",
+            "",
+        )
+        state["session_goal"] = _safe_text(payload.get("session_goal") or payload.get("goal"), max_length=320) or state.get(
+            "session_goal",
+            "",
+        )
+        state["current_course"] = _safe_text(payload.get("current_course") or payload.get("course"), max_length=180) or state.get(
+            "current_course",
+            "",
+        )
+        state["environment"] = _safe_text(payload.get("environment"), max_length=180) or state.get("environment", "")
+        state["updated_at"] = recorded_at
+        mission["learning_state_guardian"] = state
+        return {
+            "operation": operation,
+            "current_task": state.get("current_task", ""),
+            "session_goal": state.get("session_goal", ""),
+            "current_course": state.get("current_course", ""),
+            "environment": state.get("environment", ""),
+        }
+
+    if operation == "record_learning_state":
+        snapshot = {
+            "snapshot_id": _safe_text(payload.get("snapshot_id"), max_length=80) or _build_id("state"),
+            "recorded_at": recorded_at,
+            "current_task": _safe_text(payload.get("current_task") or payload.get("task"), max_length=220)
+            or state.get("current_task", ""),
+            "focus_level": max(0, min(5, _safe_int(payload.get("focus_level"), default=0))),
+            "energy_level": max(0, min(5, _safe_int(payload.get("energy_level"), default=0))),
+            "stress_level": max(0, min(5, _safe_int(payload.get("stress_level"), default=0))),
+            "comprehension_level": max(0, min(5, _safe_int(payload.get("comprehension_level"), default=0))),
+            "progress_status": _safe_text(payload.get("progress_status"), max_length=180),
+            "environment": _safe_text(payload.get("environment"), max_length=180) or state.get("environment", ""),
+            "distraction": _safe_text(payload.get("distraction"), max_length=240),
+            "support_needed": _safe_text(payload.get("support_needed"), max_length=320, preserve_lines=True),
+            "note": _safe_text(payload.get("note"), max_length=1200, preserve_lines=True),
+        }
+        history = state.get("state_history", [])
+        _append_limited(history, snapshot)
+        state["state_history"] = history
+        state["latest_state"] = snapshot
+        state["current_task"] = snapshot.get("current_task", "") or state.get("current_task", "")
+        state["environment"] = snapshot.get("environment", "") or state.get("environment", "")
+        state["risk_flags"] = _guardian_risk_flags_from_state(snapshot, state.get("focus_signals", []))
+        state["updated_at"] = recorded_at
+        mission["learning_state_guardian"] = state
+        return {
+            "operation": operation,
+            "snapshot": snapshot,
+            "risk_flags": state.get("risk_flags", []),
+            "state_history_count": len(history),
+        }
+
+    if operation == "record_focus_signal":
+        signal = {
+            "signal_id": _safe_text(payload.get("signal_id"), max_length=80) or _build_id("signal"),
+            "recorded_at": recorded_at,
+            "signal_type": _safe_text(payload.get("signal_type") or payload.get("challenge"), max_length=180),
+            "severity": _normalize_severity(payload.get("severity")),
+            "note": _safe_text(payload.get("note") or payload.get("context"), max_length=1200, preserve_lines=True),
+            "resolved": _safe_bool(payload.get("resolved"), default=False),
+        }
+        signals = state.get("focus_signals", [])
+        _append_limited(signals, signal)
+        state["focus_signals"] = signals
+        state["risk_flags"] = _guardian_risk_flags_from_state(state.get("latest_state", {}), signals)
+        state["updated_at"] = recorded_at
+        mission["learning_state_guardian"] = state
+        return {
+            "operation": operation,
+            "signal": signal,
+            "risk_flags": state.get("risk_flags", []),
+            "focus_signal_count": len(signals),
+        }
+
+    raise ValueError(f"Unsupported learning-state operation: {operation}")
+
+
+def _apply_reflection_difficulty(mission, difficulty_entry):
+    state = _ensure_payload_dict(mission.get("reflection_coach"))
+    if difficulty_entry.get("challenge") and not state.get("focus_theme"):
+        state["focus_theme"] = difficulty_entry.get("challenge", "")
+    if difficulty_entry.get("suggested_fix"):
+        commitments = state.get("action_commitments", [])
+        _append_limited(commitments, difficulty_entry["suggested_fix"])
+        state["action_commitments"] = commitments
+    state["updated_at"] = difficulty_entry.get("recorded_at", "")
+    mission["reflection_coach"] = state
+
+
+def _apply_guardian_difficulty(mission, difficulty_entry):
+    state = _ensure_payload_dict(mission.get("learning_state_guardian"))
+    signal = {
+        "signal_id": _build_id("signal"),
+        "recorded_at": difficulty_entry.get("recorded_at", ""),
+        "signal_type": difficulty_entry.get("challenge", ""),
+        "severity": difficulty_entry.get("severity", "medium"),
+        "note": difficulty_entry.get("context", ""),
+        "resolved": difficulty_entry.get("resolved", False),
+    }
+    signals = state.get("focus_signals", [])
+    _append_limited(signals, signal)
+    state["focus_signals"] = signals
+    state["risk_flags"] = _guardian_risk_flags_from_state(state.get("latest_state", {}), signals)
+    state["updated_at"] = difficulty_entry.get("recorded_at", "")
+    mission["learning_state_guardian"] = state
+
+
+def _build_reflection_chat_reply(message, mission):
+    review = _build_reflection_review(mission)
+    latest = review.get("latest_reflection", {}) or {}
+    lowered = (message or "").lower()
+    if not message:
+        return "Reflection coach is ready. Share what happened, what felt hard, and what you want to do differently next time."
+    if "next step" in lowered or "plan" in lowered:
+        commitments = review.get("recent_commitments", [])
+        if commitments:
+            return f"Your best next step is: {commitments[0]}. Keep it small enough to finish in one study block."
+        return "Turn the reflection into one concrete next step you can start within 10 minutes."
+    if "learned" in lowered or "lesson" in lowered or "reflect" in lowered:
+        if latest.get("lesson"):
+            return f"The clearest lesson right now is: {latest['lesson']}. Keep that lesson visible in the next session plan."
+        return review.get("coach_message", "Name one lesson from the last session before moving on.")
+    if "stuck" in lowered or "hard" in lowered or "block" in lowered:
+        if latest.get("what_was_hard"):
+            return (
+                f"The current blocker is {latest['what_was_hard']}. "
+                f"Shrink the next step to this: {latest.get('next_step') or 'start with the smallest repeatable action.'}"
+            )
+        return "Describe the blocker in one sentence, then convert it into a smaller action you can repeat tomorrow."
+    if "win" in lowered or "worked" in lowered or "strength" in lowered:
+        wins = review.get("recent_wins", [])
+        if wins:
+            return f"What already worked is: {wins[0]}. Reuse that pattern instead of rebuilding from scratch."
+        return "Before fixing weaknesses, capture one thing that already worked so you can repeat it."
+    return review.get("coach_message", "Capture one honest reflection entry so the coach can turn it into a next action.")
+
+
+def _build_learning_state_chat_reply(message, mission):
+    review = _build_learning_state_review(mission)
+    latest = review.get("latest_state", {}) or {}
+    lowered = (message or "").lower()
+    if not message:
+        return "Learning-state guardian is online. Tell me your current task, focus, energy, and stress so I can spot the biggest risk."
+    if "focus" in lowered or "distracted" in lowered:
+        risks = review.get("risk_flags", [])
+        if risks:
+            return f"The strongest focus signal is: {risks[0]}. Remove one distraction before you keep studying."
+        return "Your focus state looks stable enough for another work block. Keep the task narrow and log the next snapshot."
+    if "energy" in lowered or "tired" in lowered:
+        level = latest.get("energy_level", 0)
+        return (
+            f"Your latest energy level is {level}/5. "
+            "If that feels accurate, shorten the next work block and define one finish line before you continue."
+        )
+    if "stress" in lowered or "overwhelmed" in lowered:
+        level = latest.get("stress_level", 0)
+        return (
+            f"Your latest stress level is {level}/5. "
+            "Reduce the scope to one checkpoint and remove any optional task until that checkpoint is done."
+        )
+    if "task" in lowered or "progress" in lowered or "state" in lowered:
+        task = latest.get("current_task") or review.get("current_task") or "your current study task"
+        return f"Stay with {task}. {review.get('coach_message', 'Log one more state snapshot after the next focused block.')}"
+    return review.get("coach_message", "Record one learning-state snapshot so the guardian can identify the next intervention.")
+
+
 def _build_chat_reply(message, mission):
     review = _build_review(mission)
     active_title = review["presentation_state"].get("active_section_title") or "the current section"
@@ -2184,8 +2738,17 @@ def _build_chat_reply(message, mission):
     )
 
 
+def _build_capability_chat_reply(message, mission, capability):
+    if capability == CAPABILITY_REFLECTION:
+        return _build_reflection_chat_reply(message, mission)
+    if capability == CAPABILITY_GUARDIAN:
+        return _build_learning_state_chat_reply(message, mission)
+    return _build_chat_reply(message, mission)
+
+
 async def _handle_text_chat(session_id, payload):
     message = _safe_text(payload.get("message") or payload.get("text"), max_length=2000, preserve_lines=True)
+    capability = _resolve_capability(payload, event_type="text_chat")
     async with STORE_LOCK:
         store = _read_store()
         mission = _resolve_mission(store, session_id, payload, create_if_missing=True)
@@ -2199,13 +2762,14 @@ async def _handle_text_chat(session_id, payload):
                     "recorded_at": recorded_at,
                 },
             )
-        reply = _build_chat_reply(message, mission)
+        reply = _build_capability_chat_reply(message, mission, capability)
         _append_limited(
             mission["chat_history"],
             {
                 "role": "assistant",
                 "message": reply,
                 "recorded_at": recorded_at,
+                "capability": capability,
             },
         )
         mission["updated_at"] = recorded_at
@@ -2217,6 +2781,7 @@ async def _handle_text_chat(session_id, payload):
                 "session_id": session_id,
                 "mission_id": mission["mission_id"],
                 "event_type": "text_chat",
+                "capability": capability,
                 "reply": reply,
                 "received_message": message,
                 "review": _build_review(mission),
@@ -2226,11 +2791,16 @@ async def _handle_text_chat(session_id, payload):
 
 async def _handle_state_update(session_id, payload):
     operation = _safe_text(payload.get("operation"), max_length=40).lower() or "upsert_mission"
+    capability = _resolve_capability(payload, event_type="state_update")
     async with STORE_LOCK:
         store = _read_store()
         mission = _resolve_mission(store, session_id, payload, create_if_missing=True)
 
-        if operation == "extract_intake":
+        if capability == CAPABILITY_REFLECTION:
+            result = _apply_reflection_update(mission, payload, operation)
+        elif capability == CAPABILITY_GUARDIAN:
+            result = _apply_learning_state_update(mission, payload, operation)
+        elif operation == "extract_intake":
             result = _extract_intake_result(payload)
             if _safe_bool(payload.get("apply_to_mission"), default=False):
                 mission_payload = {
@@ -2250,6 +2820,7 @@ async def _handle_state_update(session_id, payload):
                         "session_id": session_id,
                         "mission_id": mission["mission_id"],
                         "event_type": "state_update",
+                        "capability": capability,
                         "operation": "extract_intake",
                         "result": result,
                         "mission": _mission_payload(mission),
@@ -2262,6 +2833,7 @@ async def _handle_state_update(session_id, payload):
                     "session_id": session_id,
                     "mission_id": mission["mission_id"],
                     "event_type": "state_update",
+                    "capability": capability,
                     "operation": "extract_intake",
                     "result": result,
                     "mission": _mission_payload(mission),
@@ -2290,6 +2862,7 @@ async def _handle_state_update(session_id, payload):
                 "session_id": session_id,
                 "mission_id": mission["mission_id"],
                 "event_type": "state_update",
+                "capability": capability,
                 "operation": result.get("operation", operation),
                 "result": result,
                 "mission": _mission_payload(mission),
@@ -2299,6 +2872,7 @@ async def _handle_state_update(session_id, payload):
 
 
 async def _handle_difficulty_event(session_id, payload):
+    capability = _resolve_capability(payload, event_type="difficulty_event")
     async with STORE_LOCK:
         store = _read_store()
         mission = _resolve_mission(store, session_id, payload, create_if_missing=True)
@@ -2306,6 +2880,7 @@ async def _handle_difficulty_event(session_id, payload):
         difficulty_entry = {
             "event_id": _safe_text(payload.get("event_id"), max_length=80) or _build_id("difficulty"),
             "recorded_at": recorded_at,
+            "capability": capability,
             "challenge": _safe_text(payload.get("challenge") or payload.get("difficulty"), max_length=180),
             "severity": _normalize_severity(payload.get("severity")),
             "section_id": _safe_text(payload.get("section_id"), max_length=80),
@@ -2328,13 +2903,13 @@ async def _handle_difficulty_event(session_id, payload):
         mission["difficulty_events"] = difficulty_events
 
         state = mission.get("presentation_state", {})
-        if difficulty_entry["challenge"]:
+        if capability == CAPABILITY_REFLECTION:
+            _apply_reflection_difficulty(mission, difficulty_entry)
+        elif capability == CAPABILITY_GUARDIAN:
+            _apply_guardian_difficulty(mission, difficulty_entry)
+        elif difficulty_entry["challenge"]:
             state["focus_area"] = difficulty_entry["challenge"]
-        mission["presentation_state"] = _normalize_presentation_state(
-            mission.get("script_sections", []),
-            existing=state,
-            incoming=state,
-        )
+        mission["presentation_state"] = _normalize_presentation_state(mission.get("script_sections", []), existing=state, incoming=state)
         mission["updated_at"] = recorded_at
         _upsert_mission(store, mission)
         _write_store(store)
@@ -2344,6 +2919,7 @@ async def _handle_difficulty_event(session_id, payload):
                 "session_id": session_id,
                 "mission_id": mission["mission_id"],
                 "event_type": "difficulty_event",
+                "capability": capability,
                 "difficulty_event": difficulty_entry,
                 "difficulty_count": len(difficulty_events),
                 "review": _build_review(mission),
@@ -2353,20 +2929,33 @@ async def _handle_difficulty_event(session_id, payload):
 
 async def _handle_session_review(session_id, payload):
     include_history = _safe_bool(payload.get("include_history"), default=False)
+    capability = _resolve_capability(payload, event_type="session_review")
     async with STORE_LOCK:
         store = _read_store()
         mission = _resolve_mission(store, session_id, payload, create_if_missing=True)
+        review = _build_review(mission)
         response = {
             "status": "success",
             "data": {
                 "session_id": session_id,
                 "mission_id": mission["mission_id"],
                 "event_type": "session_review",
+                "capability": capability,
                 "review_scope": _safe_text(payload.get("review_scope"), max_length=80) or "mission",
-                "review": _build_review(mission),
+                "review": review,
                 "mission": _mission_payload(mission),
             },
         }
+        if capability == CAPABILITY_REFLECTION:
+            response["data"]["capability_review"] = review.get("reflection_coach", {})
+        elif capability == CAPABILITY_GUARDIAN:
+            response["data"]["capability_review"] = review.get("learning_state_guardian", {})
+        else:
+            response["data"]["capability_review"] = {
+                "script_overview": review.get("script_overview", {}),
+                "presentation_state": review.get("presentation_state", {}),
+                "readiness_summary": review.get("readiness_summary", {}),
+            }
         if include_history:
             response["data"]["recent_chat_history"] = copy.deepcopy(mission.get("chat_history", [])[-10:])
         return response
