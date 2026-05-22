@@ -71,6 +71,48 @@ CAPABILITY_STATE_UPDATE_OPERATIONS = {
     CAPABILITY_REFLECTION: tuple(sorted(REFLECTION_OPERATIONS)),
     CAPABILITY_GUARDIAN: tuple(sorted(GUARDIAN_OPERATIONS)),
 }
+CONTROL_ACTION_ALIASES = {
+    "next": "next_chunk",
+    "next_chunk": "next_chunk",
+    "forward": "next_chunk",
+    "single_tap": "next_chunk",
+    "tap": "next_chunk",
+    "next_slide": "next_slide",
+    "swipe_right": "next_slide",
+    "previous": "previous_chunk",
+    "previous_chunk": "previous_chunk",
+    "back": "previous_chunk",
+    "double_tap": "previous_chunk",
+    "previous_slide": "previous_slide",
+    "swipe_left": "previous_slide",
+    "toggle": "toggle_cue",
+    "toggle_cue": "toggle_cue",
+    "hide_cue": "toggle_cue",
+    "show_cue": "toggle_cue",
+    "cue_toggle": "toggle_cue",
+}
+REVIEW_SCOPE_ALIASES = {
+    "guardian": "guardian",
+    "learning_state": "learning_state",
+    "learning": "learning_state",
+    "reflection": "reflection",
+    "reflect": "reflection",
+    "presentation": "mission",
+    "mission": "mission",
+}
+GUARDIAN_CHALLENGE_ALIASES = {
+    "look_away": "attention drift",
+    "attention_drop": "attention drift",
+    "focus_drop": "attention drift",
+    "context_switching": "context switching",
+    "tab_switching": "context switching",
+    "notification_pull": "notification distraction",
+    "fatigue": "low energy",
+    "blink_fatigue": "fatigue signal",
+    "hesitation": "task hesitation",
+    "long_pause": "task hesitation",
+    "lost_track": "lost task thread",
+}
 OPERATION_ALIASES = {
     CAPABILITY_PRESENTATION: {
         "brief": "extract_intake",
@@ -168,6 +210,66 @@ def _infer_capability_from_message(message):
     return CAPABILITY_PRESENTATION
 
 
+def _infer_capability_from_payload(payload, event_type=""):
+    payload = _ensure_payload_dict(payload)
+    reflection_markers = (
+        "focus_theme",
+        "theme",
+        "summary",
+        "session_summary",
+        "lesson",
+        "insight",
+        "what_i_learned",
+        "next_action",
+        "action_commitment",
+    )
+    guardian_markers = (
+        "attention_score",
+        "focus_score",
+        "focus_level",
+        "energy_level",
+        "fatigue_score",
+        "stress_level",
+        "stress_score",
+        "current_task",
+        "task",
+        "session_goal",
+        "support_needed",
+        "device_event_type",
+        "signal_type",
+    )
+    presentation_markers = (
+        "gesture",
+        "button",
+        "rokid_action",
+        "control_action",
+        "assignment_text",
+        "task_text",
+        "brief_text",
+        "transcript_excerpt",
+        "section_timings",
+        "teleprompter_script",
+        "speaker_notes",
+    )
+
+    if any(_first_present_value(payload, (key,)) is not None for key in reflection_markers):
+        return CAPABILITY_REFLECTION
+    if any(_first_present_value(payload, (key,)) is not None for key in guardian_markers):
+        return CAPABILITY_GUARDIAN
+    if any(_first_present_value(payload, (key,)) is not None for key in presentation_markers):
+        return CAPABILITY_PRESENTATION
+
+    if event_type == "difficulty_event" and _first_present_value(payload, ("device_event_type", "signal_type")) is not None:
+        return CAPABILITY_GUARDIAN
+    if event_type == "session_review":
+        scope = _normalize_review_scope(_first_present_value(payload, ("review_scope", "scope")), "")
+        if scope in {"reflection"}:
+            return CAPABILITY_REFLECTION
+        if scope in {"guardian", "learning_state"}:
+            return CAPABILITY_GUARDIAN
+    return ""
+
+
 def _first_present_value(payload, keys):
     payload = _ensure_payload_dict(payload)
     for key in keys:
@@ -190,6 +292,46 @@ def _canonical_operation(capability, operation):
         return "upsert_mission"
     aliases = OPERATION_ALIASES.get(capability, {})
     return aliases.get(normalized, normalized)
+
+
+def _score_to_level(value, invert=False):
+    if value is None or value == "":
+        return None
+    score = max(0.0, min(100.0, _safe_float(value, default=-1.0)))
+    if score < 0:
+        return None
+    if invert:
+        score = 100.0 - score
+    if score < 20:
+        return 1
+    if score < 40:
+        return 2
+    if score < 60:
+        return 3
+    if score < 80:
+        return 4
+    return 5
+
+
+def _normalize_control_action(value):
+    normalized = _safe_text(value, max_length=80).lower()
+    if not normalized:
+        return ""
+    return CONTROL_ACTION_ALIASES.get(normalized, normalized)
+
+
+def _normalize_review_scope(value, default_scope):
+    normalized = _safe_text(value, max_length=80).lower()
+    if not normalized:
+        return default_scope
+    return REVIEW_SCOPE_ALIASES.get(normalized, normalized)
+
+
+def _normalize_guardian_challenge(value):
+    normalized = _safe_text(value, max_length=120).lower()
+    if not normalized:
+        return ""
+    return GUARDIAN_CHALLENGE_ALIASES.get(normalized, normalized.replace("_", " "))
 
 
 def _interface_contract(capability, event_type, operation=""):
@@ -232,6 +374,10 @@ def _resolve_capability(payload, event_type=""):
         if operation in aliases:
             return candidate_capability
 
+    inferred_from_payload = _infer_capability_from_payload(payload, event_type=event_type)
+    if inferred_from_payload:
+        return inferred_from_payload
+
     if event_type == "text_chat":
         return _infer_capability_from_message(payload.get("message") or payload.get("text"))
 
@@ -249,7 +395,20 @@ def _normalize_presentation_payload(payload, event_type):
         return payload
 
     if event_type == "state_update":
-        operation = _canonical_operation(CAPABILITY_PRESENTATION, payload.get("operation"))
+        raw_operation = _safe_text(payload.get("operation"), max_length=80).lower()
+        if not raw_operation:
+            if _first_present_value(payload, ("gesture", "button", "rokid_action", "command", "control_action", "action")):
+                raw_operation = "presentation_control"
+            elif _first_present_value(payload, ("transcript_excerpt", "transcript", "transcript_text", "section_timings", "section_times")):
+                raw_operation = "record_rehearsal"
+            elif _first_present_value(payload, ("task_text", "assignment_text", "brief_text", "prompt_text")):
+                raw_operation = "extract_intake"
+            elif _first_present_value(payload, ("section_id", "card_id", "slide_id")) and _first_present_value(
+                payload,
+                ("outline", "speaker_notes", "teleprompter_script", "cue_cards"),
+            ):
+                raw_operation = "update_script_section"
+        operation = _canonical_operation(CAPABILITY_PRESENTATION, raw_operation)
         payload["operation"] = operation
         if operation == "extract_intake":
             payload["task_text"] = _safe_text(
@@ -258,10 +417,13 @@ def _normalize_presentation_payload(payload, event_type):
                 preserve_lines=True,
             )
         elif operation == "presentation_control":
-            payload["action"] = _safe_text(
-                _first_present_value(payload, ("action", "command", "control_action")),
-                max_length=40,
+            payload["action"] = _normalize_control_action(
+                _first_present_value(payload, ("action", "command", "control_action", "gesture", "button", "rokid_action"))
             )
+            payload["control_source"] = _safe_text(
+                _first_present_value(payload, ("control_source", "input_source", "source", "device_source")),
+                max_length=40,
+            ) or payload.get("control_source", "")
         elif operation == "record_rehearsal":
             transcript_source = _first_present_value(payload, ("transcript_excerpt", "transcript", "transcript_text"))
             if transcript_source is not None:
@@ -291,10 +453,7 @@ def _normalize_presentation_payload(payload, event_type):
         return payload
 
     if event_type == "session_review":
-        payload["review_scope"] = _safe_text(
-            _first_present_value(payload, ("review_scope", "scope")),
-            max_length=80,
-        ) or "mission"
+        payload["review_scope"] = _normalize_review_scope(_first_present_value(payload, ("review_scope", "scope")), "mission")
     return payload
 
 
@@ -309,7 +468,18 @@ def _normalize_reflection_payload(payload, event_type):
         return payload
 
     if event_type == "state_update":
-        operation = _canonical_operation(CAPABILITY_REFLECTION, payload.get("operation"))
+        raw_operation = _safe_text(payload.get("operation"), max_length=80).lower()
+        if not raw_operation:
+            if _first_present_value(payload, ("focus_theme", "theme", "target_habit", "habit")) and not _first_present_value(
+                payload,
+                ("summary", "session_summary", "lesson", "insight", "what_i_learned"),
+            ):
+                raw_operation = "set_reflection_focus"
+            elif _first_present_value(payload, ("steps", "actions", "next_actions")):
+                raw_operation = "plan_next_step"
+            else:
+                raw_operation = "capture_reflection"
+        operation = _canonical_operation(CAPABILITY_REFLECTION, raw_operation)
         payload["operation"] = operation
         if operation == "set_reflection_focus":
             payload["focus_theme"] = _safe_text(
@@ -375,10 +545,7 @@ def _normalize_reflection_payload(payload, event_type):
         return payload
 
     if event_type == "session_review":
-        payload["review_scope"] = _safe_text(
-            _first_present_value(payload, ("review_scope", "scope")),
-            max_length=80,
-        ) or "reflection"
+        payload["review_scope"] = _normalize_review_scope(_first_present_value(payload, ("review_scope", "scope")), "reflection")
     return payload
 
 
@@ -393,7 +560,28 @@ def _normalize_guardian_payload(payload, event_type):
         return payload
 
     if event_type == "state_update":
-        operation = _canonical_operation(CAPABILITY_GUARDIAN, payload.get("operation"))
+        raw_operation = _safe_text(payload.get("operation"), max_length=80).lower()
+        if not raw_operation:
+            if _first_present_value(payload, ("signal_type", "challenge", "category", "signal")):
+                raw_operation = "record_focus_signal"
+            elif _first_present_value(
+                payload,
+                (
+                    "focus_level",
+                    "focus",
+                    "attention_score",
+                    "energy_level",
+                    "energy",
+                    "fatigue_score",
+                    "stress_level",
+                    "stress",
+                    "stress_score",
+                ),
+            ):
+                raw_operation = "record_learning_state"
+            elif _first_present_value(payload, ("current_task", "task", "session_goal", "goal", "environment", "course")):
+                raw_operation = "set_learning_context"
+        operation = _canonical_operation(CAPABILITY_GUARDIAN, raw_operation)
         payload["operation"] = operation
         if operation == "set_learning_context":
             payload["current_task"] = _safe_text(
@@ -444,10 +632,19 @@ def _normalize_guardian_payload(payload, event_type):
                 value = _first_present_value(payload, aliases)
                 if value is not None:
                     payload[field] = value
+            for field, aliases, invert in (
+                ("focus_level", ("attention_score", "focus_score"), False),
+                ("energy_level", ("fatigue_score", "fatigue"), True),
+                ("stress_level", ("stress_score",), False),
+                ("comprehension_level", ("clarity_score", "understanding_score"), False),
+            ):
+                if payload.get(field) in (None, ""):
+                    derived = _score_to_level(_first_present_value(payload, aliases), invert=invert)
+                    if derived is not None:
+                        payload[field] = derived
         elif operation == "record_focus_signal":
-            payload["signal_type"] = _safe_text(
-                _first_present_value(payload, ("signal_type", "challenge", "category", "signal")),
-                max_length=180,
+            payload["signal_type"] = _normalize_guardian_challenge(
+                _first_present_value(payload, ("signal_type", "challenge", "category", "signal", "device_event_type"))
             )
             payload["note"] = _safe_text(
                 _first_present_value(payload, ("note", "context", "why", "details")),
@@ -457,9 +654,8 @@ def _normalize_guardian_payload(payload, event_type):
         return payload
 
     if event_type == "difficulty_event":
-        payload["challenge"] = _safe_text(
-            _first_present_value(payload, ("challenge", "signal_type", "difficulty", "blocker")),
-            max_length=180,
+        payload["challenge"] = _normalize_guardian_challenge(
+            _first_present_value(payload, ("challenge", "signal_type", "difficulty", "blocker", "device_event_type"))
         )
         payload["context"] = _safe_text(
             _first_present_value(payload, ("context", "note", "details")),
@@ -469,10 +665,7 @@ def _normalize_guardian_payload(payload, event_type):
         return payload
 
     if event_type == "session_review":
-        payload["review_scope"] = _safe_text(
-            _first_present_value(payload, ("review_scope", "scope")),
-            max_length=80,
-        ) or "learning_state"
+        payload["review_scope"] = _normalize_review_scope(_first_present_value(payload, ("review_scope", "scope")), "learning_state")
     return payload
 
 
