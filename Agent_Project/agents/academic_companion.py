@@ -3331,12 +3331,467 @@ def _build_next_actions(mission):
     return actions[:4]
 
 
+def _reflection_mode_label(task_mode):
+    normalized = _normalize_guardian_task_mode(task_mode) or "reading"
+    return normalized.replace("-", " ").title()
+
+
+def _reflection_focus_window_label(context):
+    active_event = _ensure_payload_dict(context.get("active_event"))
+    if active_event.get("time_window"):
+        return _safe_text(active_event.get("time_window"), max_length=80)
+    if active_event.get("recorded_at"):
+        return f"the {active_event.get('recorded_at')} checkpoint"
+    latest_reflection = _ensure_payload_dict(context.get("latest_reflection"))
+    if latest_reflection.get("recorded_at"):
+        return f"the {latest_reflection.get('recorded_at')} reflection"
+    return "the latest study block"
+
+
+def _reflection_context_from_mission(mission, state, history, latest):
+    guardian_review = _build_learning_state_review(mission)
+    guardian_state = _ensure_payload_dict(guardian_review.get("latest_state"))
+    core_metrics = _ensure_payload_dict(guardian_review.get("core_metrics"))
+    state_classification = _ensure_payload_dict(guardian_review.get("state_classification"))
+    state_explanation = _ensure_payload_dict(guardian_review.get("state_explanation"))
+    difficulty_tracking = _ensure_payload_dict(guardian_review.get("difficulty_tracking"))
+    active_event = _ensure_payload_dict(difficulty_tracking.get("active_event"))
+    trend_averages = _ensure_payload_dict(guardian_review.get("trend_averages"))
+
+    return {
+        "task_mode": guardian_review.get("task_mode") or guardian_state.get("task_mode") or "reading",
+        "mode_label": _reflection_mode_label(guardian_review.get("task_mode") or guardian_state.get("task_mode")),
+        "state_hint": _normalize_guardian_state_hint(state_classification.get("state_hint")) or "stable",
+        "state_hint_label": state_classification.get("state_hint_label") or _guardian_state_hint_label(
+            state_classification.get("state_hint")
+        ),
+        "active_event": active_event,
+        "difficulty_count": max(
+            _safe_int(difficulty_tracking.get("event_count"), default=0),
+            len([item for item in mission.get("difficulty_events", []) if isinstance(item, dict)]),
+        ),
+        "risk_flags": guardian_review.get("risk_flags", []),
+        "core_metrics": core_metrics,
+        "trend_averages": trend_averages,
+        "state_explanation": state_explanation,
+        "current_course": state.get("current_course", ""),
+        "target_habit": state.get("target_habit", ""),
+        "focus_theme": state.get("focus_theme", ""),
+        "latest_reflection": latest,
+        "reflection_count": len(history),
+        "updated_at": guardian_review.get("updated_at", ""),
+    }
+
+
+def _select_reflection_signature(context):
+    state_hint = _normalize_guardian_state_hint(context.get("state_hint")) or "stable"
+    risk_flags = [str(item).lower() for item in context.get("risk_flags", []) if item]
+    active_event = _ensure_payload_dict(context.get("active_event"))
+    difficulty_count = _safe_int(context.get("difficulty_count"), default=0)
+    trend_averages = _ensure_payload_dict(context.get("trend_averages"))
+    core_metrics = _ensure_payload_dict(context.get("core_metrics"))
+
+    avg_load = _safe_float(trend_averages.get("cognitive_load"), default=_safe_float(core_metrics.get("cognitive_load"), default=0.0))
+    avg_fatigue = _safe_float(trend_averages.get("fatigue_risk"), default=_safe_float(core_metrics.get("fatigue_risk"), default=0.0))
+    avg_alignment = _safe_float(
+        trend_averages.get("behavioral_alignment"),
+        default=_safe_float(core_metrics.get("behavioral_alignment"), default=100.0),
+    )
+    avg_switching = _safe_float(core_metrics.get("switching_index"), default=0.0)
+    uncertainty = _safe_float(
+        trend_averages.get("uncertainty_score"),
+        default=_safe_float(core_metrics.get("uncertainty_score"), default=0.0),
+    )
+
+    if state_hint == "signal_check" or uncertainty >= 55 or any("confidence" in item for item in risk_flags):
+        return {
+            "key": "signal_check",
+            "label": "Signal Check",
+            "tone": "signal",
+            "title": "This reflection needs cleaner signal conditions before deep interpretation.",
+            "detail": "Low-confidence or noisy state periods were frequent enough that setup quality matters before strategy changes.",
+            "next_boundary": "Keep the opening minute physically and visually stable so the next session starts from a cleaner baseline.",
+        }
+    if state_hint == "fatigue_risk" or avg_fatigue >= 46 or any("fatigue" in item or "energy" in item for item in risk_flags):
+        return {
+            "key": "fatigue_drag",
+            "label": "Fatigue Drag",
+            "tone": "warn",
+            "title": "Fatigue likely became a stronger limiter than the material itself.",
+            "detail": "The recent state pattern shows sustained fatigue pressure, so recovery timing matters as much as review strategy.",
+            "next_boundary": "Treat the next replay as a shorter, cleaner attempt instead of pushing through the same pace.",
+        }
+    if state_hint == "productive_struggle":
+        return {
+            "key": "productive_challenge",
+            "label": "Productive Challenge",
+            "tone": "cool",
+            "title": "This looks more like productive struggle than simple drift.",
+            "detail": "Load rose while the learner stayed comparatively aligned, which points to real conceptual effort rather than random disengagement.",
+            "next_boundary": "Protect the exact segment where effort turned heavy, and replay it more slowly without changing targets.",
+        }
+    if (
+        state_hint == "off_task_risk"
+        or avg_switching >= 38
+        or active_event.get("primary_label") == "Context switching"
+        or any("drift" in item or "switch" in item for item in risk_flags)
+    ):
+        return {
+            "key": "switching_drift",
+            "label": "Switching Drift",
+            "tone": "high",
+            "title": "Target switching likely disrupted the learning rhythm.",
+            "detail": "The stronger pattern here is drift pressure: attention kept moving between targets or actions faster than the task could settle.",
+            "next_boundary": "Reduce switching pressure before trying to rescue understanding with more effort.",
+        }
+    if difficulty_count == 0 and avg_load < 35 and avg_alignment >= 70:
+        return {
+            "key": "steady_control",
+            "label": "Steady Control",
+            "tone": "good",
+            "title": "The study rhythm stayed controlled and review-ready.",
+            "detail": "This recent pattern stayed comparatively stable, so the next opportunity is to preserve what worked and add a slightly harder target.",
+            "next_boundary": "Keep the same setup and turn one stable block into a deliberate stretch block next time.",
+        }
+    return {
+        "key": "mixed_regulation",
+        "label": "Mixed Regulation",
+        "tone": "warn",
+        "title": "The recent session pattern shows mixed regulation pressure.",
+        "detail": "Several pressures appeared together, so the best next step is to control one variable tightly instead of changing everything at once.",
+        "next_boundary": "Pick one boundary for the next attempt: pace, switching, or recovery timing.",
+    }
+
+
+def _reflection_experiment(title, detail, success_marker):
+    return {
+        "title": _safe_text(title, max_length=120),
+        "detail": _safe_text(detail, max_length=360, preserve_lines=True),
+        "success_marker": _safe_text(success_marker, max_length=220, preserve_lines=True),
+    }
+
+
+def _build_reflection_coach_summary(signature, context, latest):
+    core_metrics = _ensure_payload_dict(context.get("core_metrics"))
+    mode_label = context.get("mode_label", "Reading")
+    focus_score = core_metrics.get("focus_score")
+    avg_load = _safe_float(
+        _ensure_payload_dict(context.get("trend_averages")).get("cognitive_load"),
+        default=_safe_float(core_metrics.get("cognitive_load"), default=0.0),
+    )
+    avg_fatigue = _safe_float(
+        _ensure_payload_dict(context.get("trend_averages")).get("fatigue_risk"),
+        default=_safe_float(core_metrics.get("fatigue_risk"), default=0.0),
+    )
+    active_event = _ensure_payload_dict(context.get("active_event"))
+    event_text = "No sustained difficulty event is active right now."
+    if active_event:
+        event_text = (
+            f"The strongest active study-state event is {active_event.get('primary_label', 'a live blocker')} "
+            f"with status {active_event.get('status', 'active')}."
+        )
+    note_text = ""
+    if latest.get("what_was_hard"):
+        note_text = f" The latest reflection named this difficulty: {latest.get('what_was_hard')}."
+    return {
+        "headline": signature.get("title", "Reflection coach summary"),
+        "overview": (
+            f"This {mode_label.lower()} pattern is currently reading around focus "
+            f"{focus_score if focus_score is not None else 'n/a'}/100, load {int(round(avg_load))}, "
+            f"and fatigue {int(round(avg_fatigue))}. {event_text}{note_text}"
+        ),
+        "why_it_matters": (
+            f"{signature.get('detail', '')} The current evidence suggests that the review should focus on "
+            "process regulation before adding more material."
+        ).strip(),
+        "next_boundary": signature.get("next_boundary", ""),
+    }
+
+
+def _build_reflection_coach_cards(signature, context, coach_summary):
+    active_event = _ensure_payload_dict(context.get("active_event"))
+    explanation = _ensure_payload_dict(context.get("state_explanation"))
+    primary_driver = _ensure_payload_dict(explanation.get("primary_driver"))
+    event_title = "No live blocker to replay first"
+    event_detail = "Use the evidence cards below as a light reflection map."
+    if active_event:
+        event_title = f"{active_event.get('primary_label', 'Active blocker')} is the best replay target"
+        event_detail = _safe_text(
+            active_event.get("trigger_reason") or active_event.get("review_note") or "A sustained event is still active.",
+            max_length=220,
+        )
+    carry_forward_title = context.get("state_hint_label", "Current learning state")
+    carry_forward_detail = _safe_text(
+        explanation.get("top_intervention") or "Keep the next session bounded so the pattern becomes easier to interpret.",
+        max_length=220,
+    )
+    if primary_driver:
+        carry_forward_detail = (
+            f"The top driver is {primary_driver.get('label', 'the current signal')}. "
+            f"{carry_forward_detail}"
+        )
+    return [
+        {
+            "eyebrow": "Session read",
+            "title": signature.get("label", "Reflection signature"),
+            "detail": coach_summary.get("why_it_matters", ""),
+            "tone": signature.get("tone", "warn"),
+        },
+        {
+            "eyebrow": "Replay point",
+            "title": event_title,
+            "detail": event_detail,
+            "tone": "high" if active_event else "good",
+        },
+        {
+            "eyebrow": "Carry-forward rule",
+            "title": carry_forward_title,
+            "detail": carry_forward_detail,
+            "tone": "cool",
+        },
+    ]
+
+
+def _build_reflection_questions(signature, context):
+    key = signature.get("key", "mixed_regulation")
+    time_window = _reflection_focus_window_label(context)
+    mode_text = str(context.get("task_mode", "reading")).replace("-", " ")
+
+    if key == "productive_challenge":
+        return [
+            {"question": f"During {time_window}, what exact step in {mode_text} mode first changed from understandable to effortful?"},
+            {"question": "When load rose, were you still following one source consistently, or did you start scanning for rescue elsewhere?"},
+            {"question": "If you replay that segment once, what would you slow down without changing the material itself?"},
+        ]
+    if key == "switching_drift":
+        return [
+            {"question": f"What triggered the first unnecessary switch before or during {time_window}?"},
+            {"question": "Which extra source, window, or action felt helpful in the moment but actually fragmented the task?"},
+            {"question": "What single anchor could keep the next attempt on one target for the first two minutes?"},
+        ]
+    if key == "fatigue_drag":
+        return [
+            {"question": "At what moment did effort stop feeling purposeful and start feeling heavy or dull?"},
+            {"question": "What earlier cue could tell you to pause before fatigue turns into low-quality persistence?"},
+            {"question": "How short should the next replay block be if the goal is clarity rather than endurance?"},
+        ]
+    if key == "signal_check":
+        return [
+            {"question": "What most likely destabilized the signal: posture baseline, movement, switching, or scene quality?"},
+            {"question": "What can you keep physically and visually constant during the first clean minute of the next session?"},
+            {"question": "What would count as a trustworthy calibration start before you interpret the coaching output seriously?"},
+        ]
+    if key == "steady_control":
+        return [
+            {"question": "Which part of this session felt easiest to sustain, and what behavior helped that stability?"},
+            {"question": "What small challenge could you add next time without breaking the current rhythm?"},
+            {"question": "What should stay exactly the same because it clearly supported control and clarity?"},
+        ]
+    return [
+        {"question": "What changed first when the session stopped feeling smooth: pace, switching, uncertainty, or fatigue?"},
+        {"question": f"Inside {time_window}, was the main issue understanding pressure or regulation pressure?"},
+        {"question": "What one variable do you want to control more tightly in the next session so the pattern becomes easier to interpret?"},
+    ]
+
+
+def _build_reflection_experiments(signature, context):
+    key = signature.get("key", "mixed_regulation")
+    target_habit = _safe_text(context.get("target_habit"), max_length=160)
+    goal_suffix = f" while reinforcing {target_habit}" if target_habit else ""
+
+    if key == "productive_challenge":
+        return [
+            _reflection_experiment(
+                "Slow replay, same target",
+                "Replay the flagged segment once at a slower pace, but keep exactly one source in view instead of searching for help elsewhere.",
+                "Load rises later than before and the difficult step becomes easier to name.",
+            ),
+            _reflection_experiment(
+                "Confusion timestamp",
+                "The moment effort jumps, mark the exact sentence, diagram, or reasoning step rather than only noting that it felt hard.",
+                "You can point to one concrete trigger instead of describing the whole segment as confusing.",
+            ),
+            _reflection_experiment(
+                "One-minute rebuild",
+                f"After the replay, spend one minute rebuilding the logic in your own words{goal_suffix}, without opening new materials.",
+                "The concept gap narrows without a big switching spike.",
+            ),
+        ]
+    if key == "switching_drift":
+        return [
+            _reflection_experiment(
+                "Two-minute source lock",
+                "Choose one source before starting and do not switch windows, pages, or note formats for the first two minutes.",
+                "Switching pressure falls and the session reaches a steadier opening rhythm.",
+            ),
+            _reflection_experiment(
+                "Switch budget",
+                "Allow yourself only one intentional switch inside the replay block, and decide in advance why that switch is allowed.",
+                "Every switch becomes purposeful instead of reactive.",
+            ),
+            _reflection_experiment(
+                "Pre-decide the action path",
+                "Before replaying, decide whether this block is for watching, reading, or note-taking instead of blending them on the fly.",
+                "The task mode feels clearer and the guidance stabilizes faster.",
+            ),
+        ]
+    if key == "fatigue_drag":
+        return [
+            _reflection_experiment(
+                "Break before rescue",
+                "Take a short reset before replaying the flagged segment instead of trying to recover inside the same tired state.",
+                "The second attempt starts with lower fatigue and cleaner alignment.",
+            ),
+            _reflection_experiment(
+                "Short replay block",
+                "Replay only the highest-value slice of the difficult segment instead of the full long block.",
+                "Clarity improves without the session becoming another endurance test.",
+            ),
+            _reflection_experiment(
+                "Earlier stop rule",
+                "Define one clear fatigue boundary for the next session, such as posture heaviness or dull rereading, and stop before it deepens.",
+                "You exit earlier but preserve a better-quality review state.",
+            ),
+        ]
+    if key == "signal_check":
+        return [
+            _reflection_experiment(
+                "Clean calibration minute",
+                "Use the first minute only to stabilize posture, scene, and task mode before doing real study work.",
+                "Low-confidence drops become rarer in the opening phase.",
+            ),
+            _reflection_experiment(
+                "Stable surface setup",
+                "Keep the book, screen, or page position more constant so the scene lock stays credible.",
+                "The system spends less time in signal-check behavior.",
+            ),
+            _reflection_experiment(
+                "Single-mode warm start",
+                "Do not mix reading, note-taking, and review during warm-up. Start with one mode and switch later only if needed.",
+                "The next session becomes easier to interpret with higher confidence.",
+            ),
+        ]
+    if key == "steady_control":
+        return [
+            _reflection_experiment(
+                "Promote one stable block",
+                "Take the steadiest part of this session and turn it into a deliberate stretch block next time.",
+                "You keep control while increasing challenge slightly.",
+            ),
+            _reflection_experiment(
+                "Thirty-second recap",
+                "After a stable block ends, spend thirty seconds naming what helped the rhythm stay clean.",
+                "Useful study behaviors become easier to repeat on purpose.",
+            ),
+            _reflection_experiment(
+                "Stretch without clutter",
+                f"Raise difficulty slightly{goal_suffix}, but keep the setup and source strategy unchanged.",
+                "You can test growth without losing the current stability signature.",
+            ),
+        ]
+    return [
+        _reflection_experiment(
+            "One-variable retry",
+            "Keep the same material but change only one factor next time: pace, switching, or break timing.",
+            "The next session pattern becomes easier to diagnose.",
+        ),
+        _reflection_experiment(
+            "Replay the strongest segment first",
+            "Start the next review with the strongest blocker instead of doing a full passive recap.",
+            "You learn faster which regulation change actually matters.",
+        ),
+        _reflection_experiment(
+            "End with a boundary note",
+            "Write one sentence after the session about where regulation started to slip and what boundary should be held next time.",
+            "The next attempt begins with a sharper self-coaching rule.",
+        ),
+    ]
+
+
+def _build_reflection_evidence_cards(signature, context):
+    core_metrics = _ensure_payload_dict(context.get("core_metrics"))
+    explanation = _ensure_payload_dict(context.get("state_explanation"))
+    primary_driver = _ensure_payload_dict(explanation.get("primary_driver"))
+    active_event = _ensure_payload_dict(context.get("active_event"))
+    risk_flags = context.get("risk_flags", [])
+    difficulty_count = _safe_int(context.get("difficulty_count"), default=0)
+
+    return [
+        {
+            "label": "Signature",
+            "value": signature.get("label", "Reflection signature"),
+            "detail": signature.get("detail", ""),
+            "tone": signature.get("tone", "warn"),
+        },
+        {
+            "label": "Primary mode",
+            "value": context.get("mode_label", "Reading"),
+            "detail": f"{context.get('reflection_count', 0)} reflection entries captured so far.",
+            "tone": "cool",
+        },
+        {
+            "label": "Top driver",
+            "value": primary_driver.get("label", "No dominant driver"),
+            "detail": primary_driver.get("explanation", "The current pattern does not have one dominant driver yet."),
+            "tone": "high" if primary_driver else "good",
+        },
+        {
+            "label": "Focus / load / fatigue",
+            "value": f"{core_metrics.get('focus_score', 'n/a')} / {core_metrics.get('cognitive_load', 'n/a')} / {core_metrics.get('fatigue_risk', 'n/a')}",
+            "detail": "Latest guardian core metrics for reflection framing.",
+            "tone": "warn",
+        },
+        {
+            "label": "Active event",
+            "value": active_event.get("primary_label", "No active event"),
+            "detail": active_event.get("trigger_reason") or active_event.get("review_note") or "No sustained event is active.",
+            "tone": "high" if active_event else "good",
+        },
+        {
+            "label": "Risk flags",
+            "value": ", ".join(risk_flags[:2]) if risk_flags else "No dominant risk flags",
+            "detail": f"{difficulty_count} total difficulty markers captured across this mission.",
+            "tone": "signal" if risk_flags else "cool",
+        },
+    ]
+
+
+def _build_reflection_coach_memo(signature, context, coach_summary, latest):
+    core_metrics = _ensure_payload_dict(context.get("core_metrics"))
+    active_event = _ensure_payload_dict(context.get("active_event"))
+    event_line = (
+        f" The strongest live blocker is {active_event.get('primary_label')}."
+        if active_event
+        else " No sustained difficulty event is currently active."
+    )
+    reflection_note = ""
+    if latest.get("lesson"):
+        reflection_note = f" Current learner lesson: {latest.get('lesson')}."
+    elif latest.get("what_was_hard"):
+        reflection_note = f" Current blocker: {latest.get('what_was_hard')}."
+    return (
+        f"{coach_summary.get('headline', 'Reflection coach summary')} "
+        f"Latest focus is {core_metrics.get('focus_score', 'n/a')}/100 with load "
+        f"{core_metrics.get('cognitive_load', 'n/a')}/100 and fatigue {core_metrics.get('fatigue_risk', 'n/a')}/100."
+        f"{event_line} The next coaching boundary is: {signature.get('next_boundary', '')}.{reflection_note}"
+    ).strip()
+
+
 def _build_reflection_review(mission):
     state = _ensure_payload_dict(mission.get("reflection_coach"))
     history = [item for item in state.get("reflection_history", []) if isinstance(item, dict)]
     latest = state.get("latest_reflection", {}) if isinstance(state.get("latest_reflection"), dict) else {}
     if not latest and history:
         latest = history[-1]
+
+    context = _reflection_context_from_mission(mission, state, history, latest)
+    signature = _select_reflection_signature(context)
+    coach_summary = _build_reflection_coach_summary(signature, context, latest)
+    coach_cards = _build_reflection_coach_cards(signature, context, coach_summary)
+    reflection_questions = _build_reflection_questions(signature, context)
+    next_session_experiments = _build_reflection_experiments(signature, context)
+    evidence_cards = _build_reflection_evidence_cards(signature, context)
+    coach_memo = _build_reflection_coach_memo(signature, context, coach_summary, latest)
 
     theme_counter = Counter()
     for item in history[-6:]:
@@ -3363,11 +3818,18 @@ def _build_reflection_review(mission):
         "focus_theme": state.get("focus_theme", ""),
         "current_course": state.get("current_course", ""),
         "target_habit": state.get("target_habit", ""),
+        "signature": signature,
+        "coach_summary": coach_summary,
+        "coach_cards": coach_cards,
         "reflection_count": len(history),
         "latest_reflection": latest,
         "recent_commitments": commitments,
         "recent_wins": wins,
         "pattern_keywords": [item for item, _ in theme_counter.most_common(5)],
+        "reflection_questions": reflection_questions,
+        "next_session_experiments": next_session_experiments,
+        "evidence_cards": evidence_cards,
+        "coach_memo": coach_memo,
         "coach_message": coach_message,
         "updated_at": state.get("updated_at", ""),
     }
@@ -4559,6 +5021,32 @@ def _build_reflection_chat_reply(message, mission):
     lowered = (message or "").lower()
     if not message:
         return "Reflection coach is ready. Share what happened, what felt hard, and what you want to do differently next time."
+    if "question" in lowered or "prompt" in lowered:
+        questions = review.get("reflection_questions", [])
+        if questions:
+            return f"Start with this reflection prompt: {questions[0].get('question', 'What changed first when the session became hard to regulate?')}"
+        return "Start with: what changed first when the session became harder to regulate?"
+    if "experiment" in lowered or "try" in lowered or "next session" in lowered:
+        experiments = review.get("next_session_experiments", [])
+        if experiments:
+            first = _ensure_payload_dict(experiments[0])
+            return (
+                f"Try this next-session experiment: {first.get('title', 'One-variable retry')}. "
+                f"{first.get('detail', 'Change only one regulation variable next time.')}"
+            )
+        return "Change only one regulation variable next time so the pattern becomes easier to interpret."
+    if "evidence" in lowered or "pattern" in lowered or "why" in lowered:
+        cards = review.get("evidence_cards", [])
+        if cards:
+            first = _ensure_payload_dict(cards[0])
+            return (
+                f"The strongest reflection evidence is {first.get('label', 'the current pattern')}: "
+                f"{first.get('value', 'mixed regulation')}. {first.get('detail', '')}"
+            ).strip()
+        summary = _ensure_payload_dict(review.get("coach_summary"))
+        if summary.get("why_it_matters"):
+            return summary["why_it_matters"]
+        return review.get("coach_message", "The main pattern is still forming, so capture one more honest reflection entry.")
     if "next step" in lowered or "plan" in lowered:
         commitments = review.get("recent_commitments", [])
         if commitments:
