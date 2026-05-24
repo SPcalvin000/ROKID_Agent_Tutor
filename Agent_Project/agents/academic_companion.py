@@ -3481,6 +3481,60 @@ def _reflection_generation_meta(requested_provider="auto", configured_provider="
     }
 
 
+def _reflection_effective_provider(requested_provider="auto", configured_provider="ollama"):
+    requested_provider = _normalize_reflection_provider(requested_provider)
+    configured_provider = _normalize_reflection_provider(configured_provider)
+    if requested_provider == "auto":
+        return configured_provider
+    return requested_provider
+
+
+def _reflection_supports_model_override(requested_provider="auto", configured_provider="ollama"):
+    requested_provider = _normalize_reflection_provider(requested_provider)
+    configured_provider = _normalize_reflection_provider(configured_provider)
+    return requested_provider == "ollama" or (requested_provider == "auto" and configured_provider == "ollama")
+
+
+def _reflection_model_options(configured_provider="ollama", supports_model_override=False, model_override=""):
+    configured_model = _reflection_provider_model_name(configured_provider)
+    if not supports_model_override:
+        return [{"value": "", "label": "Use default model"}]
+    options = [{"value": "", "label": f"Use default model ({configured_model or 'none'})"}]
+    cleaned_override = _safe_text(model_override, max_length=120)
+    if cleaned_override and cleaned_override != configured_model:
+        options.append({"value": cleaned_override, "label": f"Use explicit override ({cleaned_override})"})
+    return options
+
+
+def _reflection_provider_status(requested_provider="auto", model_override=""):
+    requested_provider = _normalize_reflection_provider(requested_provider)
+    configured_provider = _configured_reflection_provider()
+    effective_provider = _reflection_effective_provider(requested_provider, configured_provider)
+    supports_model_override = _reflection_supports_model_override(requested_provider, configured_provider)
+    provider_available = _reflection_provider_is_configured(effective_provider)
+    configured_model = _reflection_provider_model_name(configured_provider)
+    selected_model = _reflection_provider_model_name(effective_provider, model_override=model_override)
+    return {
+        "requested_provider": requested_provider,
+        "configured_provider": configured_provider,
+        "configured_label": _reflection_provider_label(configured_provider),
+        "effective_provider": effective_provider,
+        "effective_label": _reflection_provider_label(effective_provider),
+        "provider_available": provider_available,
+        "llm_available": _reflection_any_model_provider_configured(),
+        "configured_model": configured_model,
+        "selected_model": selected_model,
+        "model_override": _safe_text(model_override, max_length=120),
+        "supports_model_override": supports_model_override,
+        "provider_options": _reflection_provider_options(),
+        "model_options": _reflection_model_options(
+            configured_provider=configured_provider,
+            supports_model_override=supports_model_override,
+            model_override=model_override,
+        ),
+    }
+
+
 def _reflection_focus_window_label(context):
     active_event = _ensure_payload_dict(context.get("active_event"))
     if active_event.get("time_window"):
@@ -3958,6 +4012,10 @@ def _build_reflection_review(mission):
     evidence_cards = _build_reflection_evidence_cards(signature, context)
     coach_memo = _build_reflection_coach_memo(signature, context, coach_summary, latest)
     configured_provider = _configured_reflection_provider()
+    provider_status = _reflection_provider_status(
+        requested_provider=context.get("provider_override") or "auto",
+        model_override=context.get("model_override", ""),
+    )
     generation = _reflection_generation_meta(
         requested_provider=context.get("provider_override") or "auto",
         configured_provider=configured_provider,
@@ -3997,6 +4055,7 @@ def _build_reflection_review(mission):
         ),
         "provider_options": _reflection_provider_options(),
         "configured_provider": configured_provider,
+        "provider_status": provider_status,
         "signature": signature,
         "coach_summary": coach_summary,
         "coach_cards": coach_cards,
@@ -5227,9 +5286,18 @@ def _apply_guardian_difficulty(mission, difficulty_entry):
 def _build_reflection_chat_reply(message, mission):
     review = _build_reflection_review(mission)
     latest = review.get("latest_reflection", {}) or {}
+    provider_status = _ensure_payload_dict(review.get("provider_status"))
     lowered = (message or "").lower()
     if not message:
         return "Reflection coach is ready. Share what happened, what felt hard, and what you want to do differently next time."
+    if "provider" in lowered or "model" in lowered or "status" in lowered:
+        return (
+            f"Reflection coach provider status: requested {provider_status.get('requested_provider', 'auto')}, "
+            f"effective {provider_status.get('effective_provider', 'heuristic')}, "
+            f"configured model {provider_status.get('configured_model', 'none') or 'none'}, "
+            f"selected model {provider_status.get('selected_model', 'none') or 'none'}, "
+            f"LLM available: {provider_status.get('llm_available', False)}."
+        )
     if "goal" in lowered or "aim" in lowered:
         if review.get("next_goal"):
             return f"Your current next-session goal is: {review.get('next_goal')}. Keep the next reflection tied to that boundary."
