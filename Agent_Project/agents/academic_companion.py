@@ -4499,6 +4499,91 @@ def _build_learning_state_review(mission):
     }
 
 
+def _build_presentation_live_hud(mission, latest_rehearsal_analysis=None):
+    mission = mission if isinstance(mission, dict) else {}
+    sections = _normalize_sections(mission.get("script_sections", []), target_duration_minutes=mission.get("target_duration_minutes", 0.0))
+    presentation_state = _presentation_state_payload(mission.get("presentation_state", {}), sections)
+    active_card = _ensure_payload_dict(presentation_state.get("active_card"))
+    next_card = _ensure_payload_dict(presentation_state.get("next_card"))
+    latest_rehearsal_analysis = _ensure_payload_dict(latest_rehearsal_analysis)
+    transcript_analysis = _ensure_payload_dict(latest_rehearsal_analysis.get("transcript_analysis"))
+    section_timing_summary = _ensure_payload_dict(latest_rehearsal_analysis.get("section_timing_summary"))
+
+    section_hint = _section_duration_hint(
+        _estimate_section_seconds(_active_section(mission)),
+        active_card.get("target_seconds", 0),
+    )
+    if latest_rehearsal_analysis.get("timing_status") == "long":
+        status_line = "Current run is still long against the target window."
+    elif latest_rehearsal_analysis.get("timing_status") == "short":
+        status_line = "Current run is still short and needs one more beat."
+    elif section_hint.get("status") == "long":
+        status_line = "Current slide looks dense for the target window."
+    elif section_hint.get("status") == "short":
+        status_line = "Current slide may need one more beat."
+    else:
+        status_line = "Current slide looks ready for the next rehearsal pass."
+
+    cue_line = ""
+    if presentation_state.get("cue_view") == "visible":
+        cue_line = (
+            active_card.get("cue_cards")
+            or active_card.get("outline")
+            or active_card.get("slide_anchor")
+            or ""
+        )
+
+    issue_line = ""
+    issues = transcript_analysis.get("issues", [])
+    if issues:
+        first_issue = _ensure_payload_dict(issues[0])
+        issue_line = first_issue.get("message") or first_issue.get("label") or ""
+    elif section_timing_summary.get("largest_overrun"):
+        largest_overrun = _ensure_payload_dict(section_timing_summary.get("largest_overrun"))
+        issue_line = (
+            f"{largest_overrun.get('section_title', 'A section')} is still over target by "
+            f"{largest_overrun.get('over_seconds', 0)} seconds."
+        )
+
+    next_action_line = ""
+    recommendations = latest_rehearsal_analysis.get("recommendations", [])
+    if isinstance(recommendations, list) and recommendations:
+        next_action_line = _safe_text(recommendations[0], max_length=120, preserve_lines=True)
+    elif latest_rehearsal_analysis.get("timing_note"):
+        next_action_line = _safe_text(latest_rehearsal_analysis.get("timing_note"), max_length=120, preserve_lines=True)
+    elif mission.get("presentation_state", {}).get("focus_area"):
+        next_action_line = f"Stay with {mission.get('presentation_state', {}).get('focus_area')} for the next rehearsal checkpoint."
+
+    return {
+        "mode": "presentation_live",
+        "mission_id": mission.get("mission_id", ""),
+        "presentation_mode": presentation_state.get("presentation_mode", "rehearse"),
+        "cue_view": presentation_state.get("cue_view", "visible"),
+        "control_source": presentation_state.get("control_source", "phone"),
+        "active_slide_index": active_card.get("slide_index", 0),
+        "active_slide_title": active_card.get("slide_title", ""),
+        "active_slide_anchor": active_card.get("slide_anchor", ""),
+        "active_chunk_index": active_card.get("active_chunk_index", 0),
+        "active_chunk_count": active_card.get("active_chunk_count", 0),
+        "chunk_progress_label": active_card.get("active_chunk_label", "0/0"),
+        "previous_chunk_preview": _safe_text(active_card.get("previous_chunk_text", ""), max_length=96, preserve_lines=True),
+        "next_chunk_preview": _safe_text(active_card.get("next_chunk_text", ""), max_length=96, preserve_lines=True),
+        "chunk_jump_supported": bool(active_card.get("chunk_jump_supported")),
+        "teleprompter_source": active_card.get("teleprompter_source", "empty"),
+        "teleprompter_text": _safe_text(active_card.get("active_chunk_text") or active_card.get("teleprompter_text"), max_length=320, preserve_lines=True),
+        "cue_line": _safe_text(cue_line, max_length=96, preserve_lines=True),
+        "interaction_hint": _safe_text(active_card.get("interaction_goal", ""), max_length=84, preserve_lines=True),
+        "status_line": _safe_text(status_line, max_length=100, preserve_lines=True),
+        "issue_line": _safe_text(issue_line, max_length=120, preserve_lines=True),
+        "next_action_line": _safe_text(next_action_line, max_length=120, preserve_lines=True),
+        "next_slide_index": next_card.get("slide_index", 0),
+        "next_slide_title": next_card.get("slide_title", ""),
+        "target_seconds": _safe_int(active_card.get("target_seconds"), default=0),
+        "target_label": _format_mmss(active_card.get("target_seconds", 0)),
+        "updated_at": _now_iso(),
+    }
+
+
 def _build_review(mission):
     sections = mission.get("script_sections", [])
     state = _presentation_state_payload(mission.get("presentation_state", {}), sections)
@@ -4514,6 +4599,7 @@ def _build_review(mission):
         latest_difficulty,
         latest_rehearsal_analysis,
     )
+    live_hud = _build_presentation_live_hud(mission, latest_rehearsal_analysis=latest_rehearsal_analysis)
 
     return {
         "mission_id": mission.get("mission_id"),
@@ -4546,6 +4632,7 @@ def _build_review(mission):
             ],
         },
         "presentation_state": state,
+        "live_hud": live_hud,
         "difficulty_overview": {
             "count": len(difficulty_events),
             "latest": latest_difficulty,
@@ -4599,6 +4686,7 @@ def _mission_payload(mission):
             mission.get("presentation_state", {}),
             mission.get("script_sections", []),
         ),
+        "live_hud": _build_presentation_live_hud(mission),
         "script_summary": _build_script_summary(
             mission.get("script_sections", []),
             target_minutes=mission.get("target_duration_minutes", 0.0),
