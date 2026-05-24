@@ -208,6 +208,28 @@ GUARDIAN_SWITCH_SIGNAL_WEIGHTS = {
     "task hesitation": 16.0,
     "lost task thread": 20.0,
 }
+GUARDIAN_SENSOR_FIELD_ALIASES = {
+    "stability": ("stability", "stability_score"),
+    "relative_pitch": ("relative_pitch", "pitch_drift"),
+    "signed_pitch_delta": ("signed_pitch_delta",),
+    "relative_yaw": ("relative_yaw", "yaw_drift"),
+    "relative_roll": ("relative_roll", "roll_drift"),
+    "combined_drift": ("combined_drift", "drift_score", "drift"),
+    "orientation_drift": ("orientation_drift",),
+    "movement_intensity": ("movement_intensity", "motion_intensity"),
+    "drift_trend": ("drift_trend",),
+    "switching_index": ("switching_index",),
+    "scene_content_score": ("scene_content_score",),
+    "scene_text_score": ("scene_text_score", "text_presence_score"),
+    "scene_stability_score": ("scene_stability_score",),
+    "scene_switch_rate": ("scene_switch_rate",),
+    "study_surface_score": ("study_surface_score",),
+    "scene_lock_score": ("scene_lock_score",),
+    "blur_score": ("blur_score",),
+    "brightness_score": ("brightness_score",),
+    "external_uncertainty": ("external_uncertainty",),
+    "scene_signal_active": ("scene_signal_active",),
+}
 GUARDIAN_DIFFICULTY_TRIGGER_COUNTS = {
     "medium": 3,
     "high": 2,
@@ -333,6 +355,20 @@ def _infer_capability_from_payload(payload, event_type=""):
         "uncertainty_score",
         "task_mode",
         "state_hint",
+        "stability",
+        "combined_drift",
+        "orientation_drift",
+        "movement_intensity",
+        "switching_index",
+        "drift_trend",
+        "scene_text_score",
+        "scene_stability_score",
+        "scene_switch_rate",
+        "study_surface_score",
+        "scene_lock_score",
+        "blur_score",
+        "brightness_score",
+        "external_uncertainty",
         "energy_level",
         "fatigue_score",
         "stress_level",
@@ -439,6 +475,8 @@ def _level_to_score(value, invert=False):
     try:
         level = int(value)
     except (TypeError, ValueError):
+        return None
+    if level <= 0:
         return None
     level = max(1, min(5, level))
     score = round(((level - 1) / 4.0) * 100.0, 1)
@@ -623,6 +661,19 @@ def _guardian_numeric_average(items, field):
     return round(sum(values) / len(values), 1)
 
 
+def _weighted_average(pairs):
+    total_weight = 0.0
+    total_value = 0.0
+    for value, weight in pairs:
+        if value is None or weight <= 0:
+            continue
+        total_weight += float(weight)
+        total_value += float(value) * float(weight)
+    if total_weight <= 0:
+        return None
+    return round(total_value / total_weight, 1)
+
+
 def _guardian_metric_trend(items, field, higher_is_better=True, threshold=6.0):
     values = []
     for item in items:
@@ -640,6 +691,37 @@ def _guardian_metric_trend(items, field, higher_is_better=True, threshold=6.0):
     if higher_is_better:
         return {"direction": "improving" if delta > 0 else "worsening", "delta": delta}
     return {"direction": "improving" if delta < 0 else "worsening", "delta": delta}
+
+
+def _extract_guardian_sensor_fields(payload):
+    payload = _ensure_payload_dict(payload)
+    extracted = {}
+    for field, aliases in GUARDIAN_SENSOR_FIELD_ALIASES.items():
+        value = _first_present_value(payload, aliases)
+        if value is None:
+            continue
+        if field == "scene_signal_active":
+            extracted[field] = _safe_bool(value, default=False)
+            continue
+        parsed = _optional_score_100(value)
+        if parsed is not None:
+            extracted[field] = parsed
+    return extracted
+
+
+def _guardian_sensor_snapshot_payload(snapshot):
+    snapshot = _ensure_payload_dict(snapshot)
+    result = {}
+    for field in GUARDIAN_SENSOR_FIELD_ALIASES:
+        value = snapshot.get(field)
+        if field == "scene_signal_active":
+            if isinstance(value, bool):
+                result[field] = value
+            continue
+        if value in (None, ""):
+            continue
+        result[field] = value
+    return result
 
 
 def _compute_guardian_switching_index(snapshot, focus_signals):
@@ -660,22 +742,49 @@ def _compute_guardian_switching_index(snapshot, focus_signals):
         score += weight * multiplier
     if snapshot.get("distraction"):
         score += 16.0
-    return round(max(0.0, min(100.0, score)), 1)
+    signal_score = round(max(0.0, min(100.0, score)), 1)
+    scene_switch_rate = _optional_score_100(snapshot.get("scene_switch_rate"))
+    movement_intensity = _optional_score_100(snapshot.get("movement_intensity"))
+    combined_drift = _optional_score_100(snapshot.get("combined_drift"))
+    derived = _weighted_average(
+        [
+            (signal_score, 0.46),
+            (scene_switch_rate, 0.28),
+            (movement_intensity, 0.16),
+            (combined_drift, 0.10),
+        ]
+    )
+    if derived is None:
+        return signal_score
+    return round(max(0.0, min(100.0, derived)), 1)
 
 
 def _compute_guardian_drift_trend(snapshot, recent_history):
     snapshot = snapshot if isinstance(snapshot, dict) else {}
     recent_history = [item for item in (recent_history or []) if isinstance(item, dict)]
+    combined_drift = _optional_score_100(snapshot.get("combined_drift"))
+    orientation_drift = _optional_score_100(snapshot.get("orientation_drift"))
+    movement_intensity = _optional_score_100(snapshot.get("movement_intensity"))
+    switching_index = _optional_score_100(snapshot.get("switching_index"))
     if not recent_history:
-        baseline = 0.0
-        if _safe_text(snapshot.get("behavioral_level"), max_length=40).lower() == "drifting":
-            baseline += 18.0
-        if _safe_text(snapshot.get("behavioral_level"), max_length=40).lower() == "misaligned":
-            baseline += 28.0
-        if _safe_text(snapshot.get("load_level"), max_length=40).lower() == "medium":
-            baseline += 14.0
-        if _safe_text(snapshot.get("load_level"), max_length=40).lower() == "high":
-            baseline += 24.0
+        baseline = _weighted_average(
+            [
+                (combined_drift, 0.34),
+                (orientation_drift, 0.26),
+                (switching_index, 0.22),
+                (movement_intensity, 0.18),
+            ]
+        )
+        if baseline is None:
+            baseline = 0.0
+            if _safe_text(snapshot.get("behavioral_level"), max_length=40).lower() == "drifting":
+                baseline += 18.0
+            if _safe_text(snapshot.get("behavioral_level"), max_length=40).lower() == "misaligned":
+                baseline += 28.0
+            if _safe_text(snapshot.get("load_level"), max_length=40).lower() == "medium":
+                baseline += 14.0
+            if _safe_text(snapshot.get("load_level"), max_length=40).lower() == "high":
+                baseline += 24.0
         return round(min(100.0, baseline), 1)
 
     previous = recent_history[-1]
@@ -686,20 +795,38 @@ def _compute_guardian_drift_trend(snapshot, recent_history):
         _safe_float(previous.get("behavioral_alignment"), default=100.0) - _safe_float(snapshot.get("behavioral_alignment"), default=100.0),
     )
     fatigue_rise = max(0.0, _safe_float(snapshot.get("fatigue_risk"), default=0.0) - _safe_float(previous.get("fatigue_risk"), default=0.0))
-    trend = (focus_drop * 0.30) + (load_rise * 0.28) + (alignment_drop * 0.24) + (fatigue_rise * 0.18)
+    drift_change = max(0.0, combined_drift - _safe_float(previous.get("combined_drift"), default=0.0)) if combined_drift is not None else 0.0
+    trend = (focus_drop * 0.24) + (load_rise * 0.22) + (alignment_drop * 0.18) + (fatigue_rise * 0.12) + (drift_change * 0.24)
     return round(max(0.0, min(100.0, trend)), 1)
 
 
 def _finalize_guardian_snapshot(snapshot, recent_history=None, focus_signals=None):
     snapshot = copy.deepcopy(_ensure_payload_dict(snapshot))
+    snapshot.update(_extract_guardian_sensor_fields(snapshot))
     task_mode = _normalize_guardian_task_mode(snapshot.get("task_mode")) or "reading"
     snapshot["task_mode"] = task_mode
+    scene_signal_active = _safe_bool(
+        snapshot.get("scene_signal_active"),
+        default=bool(_guardian_sensor_snapshot_payload(snapshot)),
+    )
+    snapshot["scene_signal_active"] = scene_signal_active
+
+    stability = _optional_score_100(snapshot.get("stability"))
+    combined_drift = _optional_score_100(snapshot.get("combined_drift"))
+    orientation_drift = _optional_score_100(snapshot.get("orientation_drift"))
+    movement_intensity = _optional_score_100(snapshot.get("movement_intensity"))
+    scene_text_score = _optional_score_100(snapshot.get("scene_text_score"))
+    scene_stability_score = _optional_score_100(snapshot.get("scene_stability_score"))
+    scene_switch_rate = _optional_score_100(snapshot.get("scene_switch_rate"))
+    study_surface_score = _optional_score_100(snapshot.get("study_surface_score"))
+    scene_lock_score = _optional_score_100(snapshot.get("scene_lock_score"))
+    blur_score = _optional_score_100(snapshot.get("blur_score"))
+    brightness_score = _optional_score_100(snapshot.get("brightness_score"))
+    external_uncertainty = _optional_score_100(snapshot.get("external_uncertainty"))
 
     focus_score = _optional_score_100(snapshot.get("focus_score"))
     if focus_score is None:
         focus_score = _level_to_score(snapshot.get("focus_level"))
-    if focus_score is not None:
-        snapshot["focus_score"] = focus_score
 
     stress_score = _optional_score_100(snapshot.get("stress_score"))
     if stress_score is None:
@@ -727,6 +854,19 @@ def _finalize_guardian_snapshot(snapshot, recent_history=None, focus_signals=Non
         if snapshot.get("support_needed"):
             penalty += 10.0
         behavioral_alignment = round(max(0.0, focus_score - penalty), 1)
+    if behavioral_alignment is None:
+        behavioral_alignment = _weighted_average(
+            [
+                (max(0.0, 100.0 - (orientation_drift or 0.0)) if orientation_drift is not None else None, 0.24),
+                (max(0.0, 100.0 - (scene_switch_rate or 0.0)) if scene_switch_rate is not None else None, 0.14),
+                (max(0.0, 100.0 - (combined_drift or 0.0)) if combined_drift is not None else None, 0.12),
+                (max(0.0, 100.0 - (movement_intensity or 0.0)) if movement_intensity is not None else None, 0.10),
+                (scene_lock_score, 0.18),
+                (study_surface_score, 0.14),
+                (scene_stability_score, 0.08),
+                (stability, 0.10),
+            ]
+        )
     if behavioral_alignment is not None:
         snapshot["behavioral_alignment"] = behavioral_alignment
 
@@ -740,6 +880,31 @@ def _finalize_guardian_snapshot(snapshot, recent_history=None, focus_signals=Non
                 max(0.0, min(100.0, 100.0 - clarity_score + (10.0 if snapshot.get("support_needed") else 0.0))),
                 1,
             )
+    if uncertainty_score is None:
+        blur_penalty = None if blur_score is None else round(max(0.0, min(100.0, (22.0 - blur_score) * 4.5)), 1)
+        brightness_penalty = None
+        if brightness_score is not None:
+            if brightness_score < 14.0:
+                brightness_penalty = round(min(100.0, (14.0 - brightness_score) * 5.2), 1)
+            elif brightness_score > 88.0:
+                brightness_penalty = round(min(100.0, (brightness_score - 88.0) * 4.8), 1)
+            else:
+                brightness_penalty = 0.0
+        uncertainty_score = _weighted_average(
+            [
+                (external_uncertainty, 0.28),
+                (blur_penalty, 0.14),
+                (brightness_penalty, 0.10),
+                (max(0.0, 100.0 - (scene_stability_score or 100.0)) if scene_stability_score is not None else None, 0.16),
+                (max(0.0, 100.0 - (study_surface_score or 100.0)) if study_surface_score is not None else None, 0.10),
+                (max(0.0, 100.0 - (scene_lock_score or 100.0)) if scene_lock_score is not None else None, 0.08),
+                (max(0.0, 100.0 - (clarity_score or 100.0)) if clarity_score is not None else None, 0.06),
+                (movement_intensity, 0.04),
+                (orientation_drift, 0.04),
+            ]
+        )
+        if uncertainty_score is not None and scene_signal_active and scene_lock_score is not None:
+            uncertainty_score = round(max(0.0, uncertainty_score - (scene_lock_score * 0.06)), 1)
     if uncertainty_score is not None:
         snapshot["uncertainty_score"] = uncertainty_score
 
@@ -756,8 +921,27 @@ def _finalize_guardian_snapshot(snapshot, recent_history=None, focus_signals=Non
             components.append(8.0)
         if components:
             cognitive_load = round(max(0.0, min(100.0, sum(components))), 1)
+    if cognitive_load is None:
+        cognitive_load = _weighted_average(
+            [
+                (stress_score, 0.22),
+                (fatigue_risk, 0.14),
+                (max(0.0, 100.0 - (clarity_score or 100.0)) if clarity_score is not None else None, 0.14),
+                (orientation_drift, 0.14),
+                (movement_intensity, 0.08),
+                (scene_switch_rate, 0.10),
+                (max(0.0, 100.0 - (scene_stability_score or 100.0)) if scene_stability_score is not None else None, 0.08),
+                (max(0.0, 100.0 - (scene_lock_score or 100.0)) if scene_lock_score is not None else None, 0.06),
+                (max(0.0, 100.0 - (study_surface_score or 100.0)) if study_surface_score is not None else None, 0.04),
+            ]
+        )
     if cognitive_load is not None:
         snapshot["cognitive_load"] = cognitive_load
+
+    if focus_score is None and behavioral_alignment is not None and cognitive_load is not None:
+        focus_score = round(max(0.0, min(100.0, (behavioral_alignment * 0.65) + ((100.0 - cognitive_load) * 0.35))), 1)
+    if focus_score is not None:
+        snapshot["focus_score"] = focus_score
 
     snapshot["behavioral_level"] = _safe_text(snapshot.get("behavioral_level"), max_length=40).lower() or _derive_guardian_behavioral_level(
         snapshot.get("behavioral_alignment"),
@@ -1221,6 +1405,20 @@ def _normalize_guardian_payload(payload, event_type):
                     "fatigue_risk",
                     "uncertainty_score",
                     "state_hint",
+                    "stability",
+                    "combined_drift",
+                    "orientation_drift",
+                    "movement_intensity",
+                    "switching_index",
+                    "drift_trend",
+                    "scene_text_score",
+                    "scene_stability_score",
+                    "scene_switch_rate",
+                    "study_surface_score",
+                    "scene_lock_score",
+                    "blur_score",
+                    "brightness_score",
+                    "external_uncertainty",
                     "energy_level",
                     "energy",
                     "fatigue_score",
@@ -1288,6 +1486,7 @@ def _normalize_guardian_payload(payload, event_type):
             payload["task_mode"] = _normalize_guardian_task_mode(
                 _first_present_value(payload, ("task_mode", "study_mode", "mode", "session_mode"))
             )
+            payload.update(_extract_guardian_sensor_fields(payload))
             for field, aliases in {
                 "focus_level": ("focus_level", "focus", "attention_level"),
                 "energy_level": ("energy_level", "energy"),
@@ -1379,6 +1578,7 @@ def _normalize_guardian_payload(payload, event_type):
 
             preview_snapshot = _finalize_guardian_snapshot(
                 {
+                    **_extract_guardian_sensor_fields(payload),
                     "task_mode": payload.get("task_mode"),
                     "focus_level": payload.get("focus_level"),
                     "energy_level": payload.get("energy_level"),
@@ -3338,6 +3538,9 @@ def _build_learning_state_review(mission):
             "behavioral_alignment": latest_state.get("behavioral_alignment"),
             "fatigue_risk": latest_state.get("fatigue_risk"),
             "uncertainty_score": latest_state.get("uncertainty_score"),
+            "switching_index": latest_state.get("switching_index"),
+            "drift_trend": latest_state.get("drift_trend"),
+            "stability": latest_state.get("stability"),
         },
         "state_classification": {
             "state_hint": latest_state.get("state_hint", ""),
@@ -3348,6 +3551,7 @@ def _build_learning_state_review(mission):
             "confidence_level": latest_state.get("confidence_level", ""),
             "load_reason": latest_state.get("load_reason", ""),
         },
+        "sensor_snapshot": _guardian_sensor_snapshot_payload(latest_state),
         "state_history_count": len(history),
         "recent_focus_signals": signals[-4:],
         "risk_flags": risk_flags,
@@ -3997,6 +4201,7 @@ def _apply_learning_state_update(mission, payload, operation):
             "support_needed": _safe_text(payload.get("support_needed"), max_length=320, preserve_lines=True),
             "note": _safe_text(payload.get("note"), max_length=1200, preserve_lines=True),
         }
+        snapshot.update(_extract_guardian_sensor_fields(payload))
         if focus_score is not None:
             snapshot["focus_score"] = focus_score
         if stress_score is not None:
