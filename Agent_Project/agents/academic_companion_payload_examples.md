@@ -177,7 +177,49 @@ And derives levels like:
 - `fatigue_score` -> `energy_level`
 - `stress_score` -> `stress_level`
 
-## 7. Learning State Signal
+## 7. Learning State Sensor Snapshot
+
+Low-level posture or scene-style payload:
+
+```json
+{
+  "agent_type": "academic_companion",
+  "event_type": "state_update",
+  "session_id": "guardian_sensor_demo",
+  "timestamp": 1710000000000,
+  "payload": {
+    "task_mode": "review",
+    "current_task": "Review problem set solutions",
+    "orientation_drift": 61,
+    "movement_intensity": 43,
+    "combined_drift": 58,
+    "scene_switch_rate": 64,
+    "scene_stability_score": 37,
+    "scene_lock_score": 28,
+    "study_surface_score": 42,
+    "scene_text_score": 71,
+    "blur_score": 12,
+    "brightness_score": 94,
+    "external_uncertainty": 33
+  }
+}
+```
+
+This auto-normalizes to:
+
+- capability: `learning_state_guardian`
+- operation: `record_learning_state`
+
+And can directly drive derived fields like:
+
+- `focus_score`
+- `cognitive_load`
+- `uncertainty_score`
+- `switching_index`
+- `drift_trend`
+- `state_hint`
+
+## 8. Learning State Signal
 
 Device-event payload:
 
@@ -200,7 +242,60 @@ This auto-normalizes to:
 - capability: `learning_state_guardian`
 - challenge: `attention drift`
 
-## 8. Session Review
+## 9. Guardian Sustained Difficulty Sequence
+
+To trigger a guardian difficulty event, send repeated medium or high state updates or signal updates in the same session.
+
+Example active-event sequence:
+
+```json
+{
+  "agent_type": "academic_companion",
+  "event_type": "state_update",
+  "session_id": "guardian_event_demo",
+  "timestamp": 1710000000000,
+  "payload": {
+    "task_mode": "note-taking",
+    "focus_score": 44,
+    "fatigue_risk": 58,
+    "stress_score": 63,
+    "clarity_score": 40,
+    "behavioral_alignment": 52,
+    "support_needed": "Need a cleaner note structure"
+  }
+}
+```
+
+If similar payloads repeat in the same session, the response can include:
+
+- `difficulty_event.status = "active"`
+- `difficulty_event.primary_label`
+- `difficulty_event.trigger_reason`
+
+To resolve the event, send stable follow-up snapshots, for example:
+
+```json
+{
+  "agent_type": "academic_companion",
+  "event_type": "state_update",
+  "session_id": "guardian_event_demo",
+  "timestamp": 1710000005000,
+  "payload": {
+    "task_mode": "note-taking",
+    "focus_score": 84,
+    "fatigue_risk": 18,
+    "stress_score": 22,
+    "clarity_score": 82,
+    "behavioral_alignment": 88
+  }
+}
+```
+
+After the state settles, the response can include:
+
+- `difficulty_event.status = "resolved"`
+
+## 10. Session Review
 
 Presentation review:
 
@@ -244,7 +339,15 @@ Learning-state review:
 }
 ```
 
-## 9. Text Chat
+Guardian review is the main place to inspect:
+
+- `core_metrics`
+- `sensor_snapshot`
+- `state_classification`
+- `state_explanation`
+- `difficulty_tracking`
+
+## 11. Text Chat
 
 Presentation coaching:
 
@@ -289,7 +392,68 @@ Learning-state coaching:
 }
 ```
 
-## 10. Success Shape
+Guardian explanation chat:
+
+```json
+{
+  "agent_type": "academic_companion",
+  "event_type": "text_chat",
+  "session_id": "guardian_demo",
+  "timestamp": 1710000000000,
+  "payload": {
+    "message": "Why did you mark this state like that?"
+  }
+}
+```
+
+This is useful after:
+
+- a sensor-style state snapshot
+- a review that returns `off_task_risk`, `fatigue_risk`, or `signal_check`
+- an active guardian difficulty event
+
+## 12. Guardian Review Fields
+
+Example learning-state review fields to expect:
+
+```json
+{
+  "current_task": "Review problem set solutions",
+  "task_mode": "review",
+  "core_metrics": {
+    "focus_score": 39.3,
+    "cognitive_load": 60.1,
+    "fatigue_risk": 58.0,
+    "uncertainty_score": 45.3,
+    "switching_index": 30.6,
+    "drift_trend": 50.1,
+    "stability": 0.0
+  },
+  "state_classification": {
+    "state_hint": "off_task_risk",
+    "state_hint_label": "Off-task risk",
+    "load_level": "medium",
+    "fatigue_level": "medium",
+    "behavioral_level": "misaligned",
+    "confidence_level": "medium",
+    "load_reason": "Behavior is drifting away from the expected review pattern"
+  },
+  "state_explanation": {
+    "why_this_state": "The guardian marked this state as off-task risk mainly because scene lock is driving the pattern.",
+    "primary_driver": {
+      "label": "Scene lock"
+    },
+    "top_intervention": "Re-anchor the study surface so the learner has one clear visual target."
+  },
+  "difficulty_tracking": {
+    "active_event": {},
+    "recent_events": [],
+    "event_count": 0
+  }
+}
+```
+
+## 13. Success Shape
 
 Every successful module response stays compatible with the gateway:
 
@@ -323,7 +487,7 @@ Every successful module response stays compatible with the gateway:
 }
 ```
 
-## 11. Error Shape
+## 14. Error Shape
 
 ```json
 {
