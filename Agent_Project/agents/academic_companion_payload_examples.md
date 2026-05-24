@@ -95,6 +95,41 @@ This auto-normalizes to:
 - capability: `presentation`
 - operation: `record_rehearsal`
 
+## 3A. Presentation Live HUD
+
+After control or rehearsal updates, the presentation review now includes a
+lightweight `live_hud` block for HUD-style or companion-style consumption.
+
+You do not call a separate HUD endpoint in this integration module. Instead,
+read `review.live_hud` from the normal response.
+
+Example fields:
+
+```json
+{
+  "mode": "presentation_live",
+  "active_slide_index": 1,
+  "active_slide_title": "Opening",
+  "active_chunk_count": 3,
+  "chunk_progress_label": "1/3",
+  "teleprompter_text": "Today I will explain the policy problem...",
+  "cue_line": "Problem -> trade-off -> recommendation",
+  "interaction_hint": "Frame the task and preview the structure.",
+  "status_line": "Current slide looks ready for the next rehearsal pass.",
+  "issue_line": "",
+  "next_action_line": "Trim one long explanation in the middle section.",
+  "next_slide_index": 2,
+  "next_slide_title": "Main Point"
+}
+```
+
+This is useful for:
+
+- Rokid HUD display
+- phone companion surfaces
+- quick teleprompter previews
+- lightweight presentation-state polling
+
 ## 4. Reflection Capture
 
 Short reflection payload without explicit capability:
@@ -343,6 +378,16 @@ Presentation review:
 }
 ```
 
+Presentation review is the main place to inspect:
+
+- `script_overview`
+- `presentation_state`
+- `live_hud`
+- `rehearsal_overview.latest_analysis`
+- `readiness_summary`
+- `practice_drills`
+- `qa_prep`
+
 Reflection review:
 
 ```json
@@ -430,6 +475,45 @@ Example reflection review fields to expect:
   "generation": {
     "mode": "heuristic",
     "used_llm": false
+  }
+}
+```
+
+## 10B. Presentation Review Fields
+
+Example presentation review fields to expect:
+
+```json
+{
+  "presentation_state": {
+    "active_card": {
+      "section_id": "opening",
+      "slide_title": "Opening",
+      "teleprompter_source": "teleprompter_script",
+      "active_chunk_text": "Today I will explain the policy problem..."
+    },
+    "next_card": {
+      "section_id": "main_point",
+      "slide_title": "Main Point"
+    }
+  },
+  "live_hud": {
+    "mode": "presentation_live",
+    "active_slide_index": 1,
+    "active_slide_title": "Opening",
+    "chunk_progress_label": "1/3",
+    "teleprompter_text": "Today I will explain the policy problem...",
+    "cue_line": "Problem -> trade-off -> recommendation",
+    "interaction_hint": "Frame the task and preview the structure.",
+    "status_line": "Current slide looks ready for the next rehearsal pass.",
+    "next_slide_index": 2,
+    "next_slide_title": "Main Point"
+  },
+  "rehearsal_overview": {
+    "latest_analysis": {
+      "timing_status": "long",
+      "timing_note": "The rehearsal ran over the target window."
+    }
   }
 }
 ```
