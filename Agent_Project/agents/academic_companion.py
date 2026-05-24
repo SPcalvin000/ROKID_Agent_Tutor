@@ -100,6 +100,30 @@ REVIEW_SCOPE_ALIASES = {
     "presentation": "mission",
     "mission": "mission",
 }
+GUARDIAN_TASK_MODE_ALIASES = {
+    "lecture": "lecture",
+    "reading": "reading",
+    "review": "review",
+    "note_taking": "note-taking",
+    "note-taking": "note-taking",
+    "notes": "note-taking",
+}
+GUARDIAN_STATE_HINT_ALIASES = {
+    "stable": "stable",
+    "load_rising": "load_rising",
+    "fatigue_risk": "fatigue_risk",
+    "off_task_risk": "off_task_risk",
+    "productive_struggle": "productive_struggle",
+    "signal_check": "signal_check",
+}
+GUARDIAN_STATE_HINT_LABELS = {
+    "stable": "Stable learning state",
+    "load_rising": "Load rising",
+    "fatigue_risk": "Fatigue risk rising",
+    "off_task_risk": "Off-task risk",
+    "productive_struggle": "Productive struggle",
+    "signal_check": "Signal quality check",
+}
 GUARDIAN_CHALLENGE_ALIASES = {
     "look_away": "attention drift",
     "attention_drop": "attention drift",
@@ -227,6 +251,12 @@ def _infer_capability_from_payload(payload, event_type=""):
         "attention_score",
         "focus_score",
         "focus_level",
+        "cognitive_load",
+        "behavioral_alignment",
+        "fatigue_risk",
+        "uncertainty_score",
+        "task_mode",
+        "state_hint",
         "energy_level",
         "fatigue_score",
         "stress_level",
@@ -313,6 +343,34 @@ def _score_to_level(value, invert=False):
     return 5
 
 
+def _safe_score_100(value, default=0.0):
+    return round(max(0.0, min(100.0, _safe_float(value, default=default))), 1)
+
+
+def _optional_score_100(value):
+    if value in (None, ""):
+        return None
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return None
+    return round(max(0.0, min(100.0, score)), 1)
+
+
+def _level_to_score(value, invert=False):
+    if value in (None, ""):
+        return None
+    try:
+        level = int(value)
+    except (TypeError, ValueError):
+        return None
+    level = max(1, min(5, level))
+    score = round(((level - 1) / 4.0) * 100.0, 1)
+    if invert:
+        return round(100.0 - score, 1)
+    return score
+
+
 def _normalize_control_action(value):
     normalized = _safe_text(value, max_length=80).lower()
     if not normalized:
@@ -332,6 +390,144 @@ def _normalize_guardian_challenge(value):
     if not normalized:
         return ""
     return GUARDIAN_CHALLENGE_ALIASES.get(normalized, normalized.replace("_", " "))
+
+
+def _normalize_guardian_task_mode(value):
+    normalized = _safe_text(value, max_length=80).lower()
+    if not normalized:
+        return ""
+    return GUARDIAN_TASK_MODE_ALIASES.get(normalized, normalized.replace("_", "-"))
+
+
+def _normalize_guardian_state_hint(value):
+    normalized = _safe_text(value, max_length=80).lower()
+    if not normalized:
+        return ""
+    return GUARDIAN_STATE_HINT_ALIASES.get(normalized, normalized.replace(" ", "_"))
+
+
+def _guardian_state_hint_label(value):
+    normalized = _normalize_guardian_state_hint(value) or "stable"
+    return GUARDIAN_STATE_HINT_LABELS.get(normalized, normalized.replace("_", " ").title())
+
+
+def _derive_guardian_load_level(cognitive_load):
+    score = _safe_score_100(cognitive_load, default=0.0)
+    if score >= 78:
+        return "high"
+    if score >= 46:
+        return "medium"
+    return "low"
+
+
+def _derive_guardian_fatigue_level(fatigue_risk):
+    score = _safe_score_100(fatigue_risk, default=0.0)
+    if score >= 65:
+        return "high"
+    if score >= 38:
+        return "medium"
+    return "low"
+
+
+def _derive_guardian_behavioral_level(behavioral_alignment):
+    score = _safe_score_100(behavioral_alignment, default=100.0)
+    if score < 42:
+        return "misaligned"
+    if score < 72:
+        return "drifting"
+    return "aligned"
+
+
+def _derive_guardian_confidence_level(uncertainty_score):
+    score = _safe_score_100(uncertainty_score, default=35.0)
+    if score >= 55:
+        return "low"
+    if score >= 28:
+        return "medium"
+    return "high"
+
+
+def _derive_guardian_state_hint(snapshot):
+    if not isinstance(snapshot, dict):
+        return "stable"
+    fatigue_risk = _safe_score_100(snapshot.get("fatigue_risk"), default=0.0)
+    uncertainty_score = _safe_score_100(snapshot.get("uncertainty_score"), default=35.0)
+    behavioral_alignment = _safe_score_100(snapshot.get("behavioral_alignment"), default=100.0)
+    cognitive_load = _safe_score_100(snapshot.get("cognitive_load"), default=0.0)
+    behavioral_level = _safe_text(snapshot.get("behavioral_level"), max_length=40).lower() or _derive_guardian_behavioral_level(
+        behavioral_alignment
+    )
+
+    if uncertainty_score >= 55:
+        return "signal_check"
+    if fatigue_risk >= 65:
+        return "fatigue_risk"
+    if behavioral_level == "misaligned" or cognitive_load >= 78:
+        return "off_task_risk"
+    if behavioral_alignment >= 76 and fatigue_risk < 40 and uncertainty_score < 45 and 35 <= cognitive_load <= 72:
+        return "productive_struggle"
+    if behavioral_level == "drifting" or cognitive_load >= 46:
+        return "load_rising"
+    return "stable"
+
+
+def _derive_guardian_load_reason(snapshot):
+    if not isinstance(snapshot, dict):
+        return "Stable learning state"
+    fatigue_level = _safe_text(snapshot.get("fatigue_level"), max_length=40).lower() or _derive_guardian_fatigue_level(
+        snapshot.get("fatigue_risk")
+    )
+    uncertainty_score = _safe_score_100(snapshot.get("uncertainty_score"), default=35.0)
+    state_hint = _safe_text(snapshot.get("state_hint"), max_length=80).lower() or _derive_guardian_state_hint(snapshot)
+    cognitive_load = _safe_score_100(snapshot.get("cognitive_load"), default=0.0)
+    behavioral_level = _safe_text(snapshot.get("behavioral_level"), max_length=40).lower() or _derive_guardian_behavioral_level(
+        snapshot.get("behavioral_alignment")
+    )
+
+    if fatigue_level == "high":
+        return "Possible fatigue slump"
+    if uncertainty_score >= 55:
+        return "Signal warming up or mode transition"
+    if state_hint == "productive_struggle":
+        return "Aligned effort is high but still stable"
+    if cognitive_load >= 78 or behavioral_level == "misaligned":
+        return "Sustained behavior drift"
+    if cognitive_load >= 46 or behavioral_level == "drifting":
+        return "Behavior alignment is drifting"
+    return "Stable learning state"
+
+
+def _guardian_numeric_average(items, field):
+    values = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        value = item.get(field)
+        if value in (None, ""):
+            continue
+        values.append(_safe_float(value, default=0.0))
+    if not values:
+        return 0.0
+    return round(sum(values) / len(values), 1)
+
+
+def _guardian_metric_trend(items, field, higher_is_better=True, threshold=6.0):
+    values = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        value = item.get(field)
+        if value in (None, ""):
+            continue
+        values.append(_safe_float(value, default=0.0))
+    if len(values) < 2:
+        return {"direction": "stable", "delta": 0.0}
+    delta = round(values[-1] - values[0], 1)
+    if abs(delta) < threshold:
+        return {"direction": "stable", "delta": delta}
+    if higher_is_better:
+        return {"direction": "improving" if delta > 0 else "worsening", "delta": delta}
+    return {"direction": "improving" if delta < 0 else "worsening", "delta": delta}
 
 
 def _interface_contract(capability, event_type, operation=""):
@@ -570,6 +766,12 @@ def _normalize_guardian_payload(payload, event_type):
                     "focus_level",
                     "focus",
                     "attention_score",
+                    "focus_score",
+                    "cognitive_load",
+                    "behavioral_alignment",
+                    "fatigue_risk",
+                    "uncertainty_score",
+                    "state_hint",
                     "energy_level",
                     "energy",
                     "fatigue_score",
@@ -579,7 +781,7 @@ def _normalize_guardian_payload(payload, event_type):
                 ),
             ):
                 raw_operation = "record_learning_state"
-            elif _first_present_value(payload, ("current_task", "task", "session_goal", "goal", "environment", "course")):
+            elif _first_present_value(payload, ("current_task", "task", "session_goal", "goal", "environment", "course", "task_mode")):
                 raw_operation = "set_learning_context"
         operation = _canonical_operation(CAPABILITY_GUARDIAN, raw_operation)
         payload["operation"] = operation
@@ -599,6 +801,9 @@ def _normalize_guardian_payload(payload, event_type):
             payload["environment"] = _safe_text(
                 _first_present_value(payload, ("environment", "location", "study_environment")),
                 max_length=180,
+            )
+            payload["task_mode"] = _normalize_guardian_task_mode(
+                _first_present_value(payload, ("task_mode", "study_mode", "mode", "session_mode"))
             )
         elif operation == "record_learning_state":
             payload["current_task"] = _safe_text(
@@ -623,6 +828,17 @@ def _normalize_guardian_payload(payload, event_type):
                 max_length=1200,
                 preserve_lines=True,
             )
+            payload["environment"] = _safe_text(
+                _first_present_value(payload, ("environment", "location", "study_environment")),
+                max_length=180,
+            )
+            payload["current_course"] = _safe_text(
+                _first_present_value(payload, ("current_course", "course", "module", "subject")),
+                max_length=180,
+            )
+            payload["task_mode"] = _normalize_guardian_task_mode(
+                _first_present_value(payload, ("task_mode", "study_mode", "mode", "session_mode"))
+            )
             for field, aliases in {
                 "focus_level": ("focus_level", "focus", "attention_level"),
                 "energy_level": ("energy_level", "energy"),
@@ -642,6 +858,121 @@ def _normalize_guardian_payload(payload, event_type):
                     derived = _score_to_level(_first_present_value(payload, aliases), invert=invert)
                     if derived is not None:
                         payload[field] = derived
+            focus_score = _optional_score_100(_first_present_value(payload, ("focus_score", "attention_score")))
+            if focus_score is None:
+                focus_score = _level_to_score(payload.get("focus_level"))
+            if focus_score is not None:
+                payload["focus_score"] = focus_score
+
+            stress_score = _optional_score_100(_first_present_value(payload, ("stress_score", "pressure_score")))
+            if stress_score is None:
+                stress_score = _level_to_score(payload.get("stress_level"))
+            if stress_score is not None:
+                payload["stress_score"] = stress_score
+
+            clarity_score = _optional_score_100(
+                _first_present_value(payload, ("clarity_score", "understanding_score", "comprehension_score"))
+            )
+            if clarity_score is None:
+                clarity_score = _level_to_score(payload.get("comprehension_level"))
+            if clarity_score is not None:
+                payload["clarity_score"] = clarity_score
+
+            fatigue_risk = _optional_score_100(_first_present_value(payload, ("fatigue_risk", "fatigue_score")))
+            if fatigue_risk is None:
+                fatigue_risk = _level_to_score(payload.get("energy_level"), invert=True)
+            if fatigue_risk is not None:
+                payload["fatigue_risk"] = fatigue_risk
+
+            behavioral_alignment = _optional_score_100(
+                _first_present_value(payload, ("behavioral_alignment", "behavior_alignment", "alignment_score"))
+            )
+            if behavioral_alignment is None and focus_score is not None:
+                penalty = 0.0
+                if payload.get("distraction"):
+                    penalty += 24.0
+                if payload.get("support_needed"):
+                    penalty += 10.0
+                behavioral_alignment = round(max(0.0, focus_score - penalty), 1)
+            if behavioral_alignment is not None:
+                payload["behavioral_alignment"] = behavioral_alignment
+
+            uncertainty_score = _optional_score_100(_first_present_value(payload, ("uncertainty_score", "uncertainty")))
+            if uncertainty_score is None:
+                confidence_score = _optional_score_100(_first_present_value(payload, ("confidence_score",)))
+                if confidence_score is not None:
+                    uncertainty_score = round(max(0.0, 100.0 - confidence_score), 1)
+                elif clarity_score is not None:
+                    uncertainty_score = round(
+                        max(0.0, min(100.0, 100.0 - clarity_score + (10.0 if payload.get("support_needed") else 0.0))),
+                        1,
+                    )
+            if uncertainty_score is not None:
+                payload["uncertainty_score"] = uncertainty_score
+
+            cognitive_load = _optional_score_100(
+                _first_present_value(payload, ("cognitive_load", "load_score", "workload_score", "mental_load", "mental_load_score"))
+            )
+            if cognitive_load is None:
+                components = []
+                if stress_score is not None:
+                    components.append(stress_score * 0.55)
+                if clarity_score is not None:
+                    components.append((100.0 - clarity_score) * 0.35)
+                if payload.get("distraction"):
+                    components.append(12.0)
+                if payload.get("support_needed"):
+                    components.append(8.0)
+                if components:
+                    cognitive_load = round(max(0.0, min(100.0, sum(components))), 1)
+            if cognitive_load is not None:
+                payload["cognitive_load"] = cognitive_load
+
+            behavioral_level = _safe_text(_first_present_value(payload, ("behavioral_level",)), max_length=40).lower()
+            if not behavioral_level and behavioral_alignment is not None:
+                behavioral_level = _derive_guardian_behavioral_level(behavioral_alignment)
+            if behavioral_level:
+                payload["behavioral_level"] = behavioral_level
+
+            fatigue_level = _safe_text(_first_present_value(payload, ("fatigue_level",)), max_length=40).lower()
+            if not fatigue_level and fatigue_risk is not None:
+                fatigue_level = _derive_guardian_fatigue_level(fatigue_risk)
+            if fatigue_level:
+                payload["fatigue_level"] = fatigue_level
+
+            confidence_level = _safe_text(_first_present_value(payload, ("confidence_level",)), max_length=40).lower()
+            if not confidence_level and uncertainty_score is not None:
+                confidence_level = _derive_guardian_confidence_level(uncertainty_score)
+            if confidence_level:
+                payload["confidence_level"] = confidence_level
+
+            load_level = _safe_text(_first_present_value(payload, ("load_level",)), max_length=40).lower()
+            if not load_level and cognitive_load is not None:
+                load_level = _derive_guardian_load_level(cognitive_load)
+            if load_level:
+                payload["load_level"] = load_level
+
+            preview_snapshot = {
+                "focus_score": payload.get("focus_score"),
+                "cognitive_load": payload.get("cognitive_load"),
+                "behavioral_alignment": payload.get("behavioral_alignment"),
+                "behavioral_level": payload.get("behavioral_level"),
+                "fatigue_risk": payload.get("fatigue_risk"),
+                "fatigue_level": payload.get("fatigue_level"),
+                "uncertainty_score": payload.get("uncertainty_score"),
+                "confidence_level": payload.get("confidence_level"),
+                "load_level": payload.get("load_level"),
+            }
+            state_hint = _normalize_guardian_state_hint(
+                _first_present_value(payload, ("state_hint", "state_label", "state_classification", "hint"))
+            )
+            if not state_hint:
+                state_hint = _derive_guardian_state_hint(preview_snapshot)
+            payload["state_hint"] = state_hint
+            payload["load_reason"] = _safe_text(
+                _first_present_value(payload, ("load_reason", "review_note")),
+                max_length=220,
+            ) or _derive_guardian_load_reason({**preview_snapshot, "state_hint": state_hint})
         elif operation == "record_focus_signal":
             payload["signal_type"] = _normalize_guardian_challenge(
                 _first_present_value(payload, ("signal_type", "challenge", "category", "signal", "device_event_type"))
@@ -2195,6 +2526,7 @@ def _default_learning_state_guardian(created_at=""):
         "session_goal": "",
         "current_course": "",
         "environment": "",
+        "task_mode": "",
         "latest_state": {},
         "state_history": [],
         "focus_signals": [],
@@ -2381,14 +2713,51 @@ def _guardian_risk_flags_from_state(latest_state, focus_signals):
     latest_state = latest_state if isinstance(latest_state, dict) else {}
     focus_signals = focus_signals if isinstance(focus_signals, list) else []
     risk_flags = []
-    if _safe_int(latest_state.get("focus_level"), default=0) and _safe_int(latest_state.get("focus_level"), default=0) <= 2:
+    focus_score = _optional_score_100(latest_state.get("focus_score"))
+    fatigue_risk = _optional_score_100(latest_state.get("fatigue_risk"))
+    uncertainty_score = _optional_score_100(latest_state.get("uncertainty_score"))
+    cognitive_load = _optional_score_100(latest_state.get("cognitive_load"))
+    focus_level = _safe_int(latest_state.get("focus_level"), default=0)
+    energy_level = _safe_int(latest_state.get("energy_level"), default=0)
+    stress_level = _safe_int(latest_state.get("stress_level"), default=0)
+    state_hint = _normalize_guardian_state_hint(latest_state.get("state_hint"))
+    behavioral_level = _safe_text(latest_state.get("behavioral_level"), max_length=40).lower()
+    if not behavioral_level and latest_state.get("behavioral_alignment") not in (None, ""):
+        behavioral_level = _derive_guardian_behavioral_level(latest_state.get("behavioral_alignment"))
+
+    if focus_score is not None and focus_score <= 40:
         risk_flags.append("Low focus signal")
-    if _safe_int(latest_state.get("energy_level"), default=0) and _safe_int(latest_state.get("energy_level"), default=0) <= 2:
+    elif focus_level and focus_level <= 2:
+        risk_flags.append("Low focus signal")
+
+    if fatigue_risk is not None and fatigue_risk >= 65:
+        risk_flags.append("Fatigue risk rising")
+    elif energy_level and energy_level <= 2:
         risk_flags.append("Low energy signal")
-    if _safe_int(latest_state.get("stress_level"), default=0) >= 4:
+
+    if uncertainty_score is not None and uncertainty_score >= 55:
+        risk_flags.append("Low-confidence signal quality")
+
+    if behavioral_level == "misaligned":
+        risk_flags.append("Behavior drift from current task")
+    elif behavioral_level == "drifting":
+        risk_flags.append("Behavior alignment is slipping")
+
+    if cognitive_load is not None and cognitive_load >= 78:
+        risk_flags.append("High cognitive load")
+
+    if stress_level >= 4:
         risk_flags.append("High stress signal")
     if latest_state.get("distraction"):
         risk_flags.append("Active distraction noted")
+    if latest_state.get("support_needed"):
+        risk_flags.append("Support request still open")
+    if state_hint == "off_task_risk":
+        risk_flags.append("Study state is drifting off target")
+    elif state_hint == "fatigue_risk":
+        risk_flags.append("Fatigue risk is becoming dominant")
+    elif state_hint == "signal_check":
+        risk_flags.append("Signal confidence still warming up")
     recent_unresolved = [
         item
         for item in focus_signals[-4:]
@@ -2422,10 +2791,49 @@ def _build_learning_state_review(mission):
         "stress_level": round(sum(_safe_int(item.get("stress_level"), default=0) for item in recent_history) / len(recent_history), 1)
         if recent_history
         else 0.0,
+        "focus_score": _guardian_numeric_average(recent_history, "focus_score"),
+        "cognitive_load": _guardian_numeric_average(recent_history, "cognitive_load"),
+        "behavioral_alignment": _guardian_numeric_average(recent_history, "behavioral_alignment"),
+        "fatigue_risk": _guardian_numeric_average(recent_history, "fatigue_risk"),
+        "uncertainty_score": _guardian_numeric_average(recent_history, "uncertainty_score"),
     }
     risk_flags = state.get("risk_flags", []) or _guardian_risk_flags_from_state(latest_state, signals)
-    coach_message = "Record one state snapshot with focus, energy, and stress so the guardian can spot trends."
-    if risk_flags:
+    recent_hints = [
+        _normalize_guardian_state_hint(item.get("state_hint"))
+        for item in recent_history
+        if _normalize_guardian_state_hint(item.get("state_hint"))
+    ]
+    hint_counter = Counter(recent_hints)
+    dominant_state_hint = hint_counter.most_common(1)[0][0] if hint_counter else _normalize_guardian_state_hint(
+        latest_state.get("state_hint")
+    )
+    trend_signals = {
+        "focus_score": _guardian_metric_trend(recent_history, "focus_score", higher_is_better=True, threshold=8.0),
+        "cognitive_load": _guardian_metric_trend(recent_history, "cognitive_load", higher_is_better=False, threshold=8.0),
+        "behavioral_alignment": _guardian_metric_trend(
+            recent_history,
+            "behavioral_alignment",
+            higher_is_better=True,
+            threshold=8.0,
+        ),
+        "fatigue_risk": _guardian_metric_trend(recent_history, "fatigue_risk", higher_is_better=False, threshold=8.0),
+        "uncertainty_score": _guardian_metric_trend(
+            recent_history,
+            "uncertainty_score",
+            higher_is_better=False,
+            threshold=8.0,
+        ),
+    }
+    coach_message = "Record one state snapshot with focus, load, and fatigue so the guardian can spot trends."
+    if dominant_state_hint == "fatigue_risk":
+        coach_message = "Fatigue risk is rising. Shorten the next block, reduce scope, and return only after a clear reset."
+    elif dominant_state_hint == "off_task_risk":
+        coach_message = "Your study behavior is drifting from the task. Remove one distraction and restate the next checkpoint before continuing."
+    elif dominant_state_hint == "signal_check":
+        coach_message = "The signal is still warming up. Capture one more clean snapshot before making a bigger study decision."
+    elif dominant_state_hint == "productive_struggle":
+        coach_message = "This looks like productive struggle. Stay with the current task, but keep the finish line narrow."
+    elif risk_flags:
         coach_message = f"The main study-state risk is {risk_flags[0]}. Reduce one friction point before the next work block."
     elif latest_state.get("current_task") or state.get("current_task"):
         coach_message = (
@@ -2438,11 +2846,30 @@ def _build_learning_state_review(mission):
         "session_goal": state.get("session_goal", ""),
         "current_course": state.get("current_course", ""),
         "environment": state.get("environment", ""),
+        "task_mode": state.get("task_mode", "") or latest_state.get("task_mode", ""),
         "latest_state": latest_state,
+        "core_metrics": {
+            "focus_score": latest_state.get("focus_score"),
+            "cognitive_load": latest_state.get("cognitive_load"),
+            "behavioral_alignment": latest_state.get("behavioral_alignment"),
+            "fatigue_risk": latest_state.get("fatigue_risk"),
+            "uncertainty_score": latest_state.get("uncertainty_score"),
+        },
+        "state_classification": {
+            "state_hint": latest_state.get("state_hint", ""),
+            "state_hint_label": _guardian_state_hint_label(latest_state.get("state_hint")),
+            "load_level": latest_state.get("load_level", ""),
+            "fatigue_level": latest_state.get("fatigue_level", ""),
+            "behavioral_level": latest_state.get("behavioral_level", ""),
+            "confidence_level": latest_state.get("confidence_level", ""),
+            "load_reason": latest_state.get("load_reason", ""),
+        },
         "state_history_count": len(history),
         "recent_focus_signals": signals[-4:],
         "risk_flags": risk_flags,
         "trend_averages": averages,
+        "trend_signals": trend_signals,
+        "dominant_state_hint": dominant_state_hint,
         "coach_message": coach_message,
         "updated_at": state.get("updated_at", ""),
     }
@@ -3004,6 +3431,7 @@ def _apply_learning_state_update(mission, payload, operation):
             "",
         )
         state["environment"] = _safe_text(payload.get("environment"), max_length=180) or state.get("environment", "")
+        state["task_mode"] = _normalize_guardian_task_mode(payload.get("task_mode")) or state.get("task_mode", "")
         state["updated_at"] = recorded_at
         mission["learning_state_guardian"] = state
         return {
@@ -3012,30 +3440,110 @@ def _apply_learning_state_update(mission, payload, operation):
             "session_goal": state.get("session_goal", ""),
             "current_course": state.get("current_course", ""),
             "environment": state.get("environment", ""),
+            "task_mode": state.get("task_mode", ""),
         }
 
     if operation == "record_learning_state":
+        focus_level = max(0, min(5, _safe_int(payload.get("focus_level"), default=0)))
+        energy_level = max(0, min(5, _safe_int(payload.get("energy_level"), default=0)))
+        stress_level = max(0, min(5, _safe_int(payload.get("stress_level"), default=0)))
+        comprehension_level = max(0, min(5, _safe_int(payload.get("comprehension_level"), default=0)))
+        focus_score = _optional_score_100(payload.get("focus_score"))
+        if focus_score is None:
+            focus_score = _level_to_score(focus_level)
+        stress_score = _optional_score_100(payload.get("stress_score"))
+        if stress_score is None:
+            stress_score = _level_to_score(stress_level)
+        clarity_score = _optional_score_100(payload.get("clarity_score"))
+        if clarity_score is None:
+            clarity_score = _level_to_score(comprehension_level)
+        fatigue_risk = _optional_score_100(payload.get("fatigue_risk"))
+        if fatigue_risk is None:
+            fatigue_risk = _level_to_score(energy_level, invert=True)
+        behavioral_alignment = _optional_score_100(payload.get("behavioral_alignment"))
+        if behavioral_alignment is None and focus_score is not None:
+            penalty = 0.0
+            if payload.get("distraction"):
+                penalty += 24.0
+            if payload.get("support_needed"):
+                penalty += 10.0
+            behavioral_alignment = round(max(0.0, focus_score - penalty), 1)
+        uncertainty_score = _optional_score_100(payload.get("uncertainty_score"))
+        if uncertainty_score is None:
+            confidence_score = _optional_score_100(payload.get("confidence_score"))
+            if confidence_score is not None:
+                uncertainty_score = round(max(0.0, 100.0 - confidence_score), 1)
+            elif clarity_score is not None:
+                uncertainty_score = round(
+                    max(0.0, min(100.0, 100.0 - clarity_score + (10.0 if payload.get("support_needed") else 0.0))),
+                    1,
+                )
+        cognitive_load = _optional_score_100(payload.get("cognitive_load"))
+        if cognitive_load is None:
+            components = []
+            if stress_score is not None:
+                components.append(stress_score * 0.55)
+            if clarity_score is not None:
+                components.append((100.0 - clarity_score) * 0.35)
+            if payload.get("distraction"):
+                components.append(12.0)
+            if payload.get("support_needed"):
+                components.append(8.0)
+            if components:
+                cognitive_load = round(max(0.0, min(100.0, sum(components))), 1)
         snapshot = {
             "snapshot_id": _safe_text(payload.get("snapshot_id"), max_length=80) or _build_id("state"),
             "recorded_at": recorded_at,
             "current_task": _safe_text(payload.get("current_task") or payload.get("task"), max_length=220)
             or state.get("current_task", ""),
-            "focus_level": max(0, min(5, _safe_int(payload.get("focus_level"), default=0))),
-            "energy_level": max(0, min(5, _safe_int(payload.get("energy_level"), default=0))),
-            "stress_level": max(0, min(5, _safe_int(payload.get("stress_level"), default=0))),
-            "comprehension_level": max(0, min(5, _safe_int(payload.get("comprehension_level"), default=0))),
+            "current_course": _safe_text(payload.get("current_course"), max_length=180) or state.get("current_course", ""),
+            "task_mode": _normalize_guardian_task_mode(payload.get("task_mode")) or state.get("task_mode", ""),
+            "focus_level": focus_level,
+            "energy_level": energy_level,
+            "stress_level": stress_level,
+            "comprehension_level": comprehension_level,
             "progress_status": _safe_text(payload.get("progress_status"), max_length=180),
             "environment": _safe_text(payload.get("environment"), max_length=180) or state.get("environment", ""),
             "distraction": _safe_text(payload.get("distraction"), max_length=240),
             "support_needed": _safe_text(payload.get("support_needed"), max_length=320, preserve_lines=True),
             "note": _safe_text(payload.get("note"), max_length=1200, preserve_lines=True),
         }
+        if focus_score is not None:
+            snapshot["focus_score"] = focus_score
+        if stress_score is not None:
+            snapshot["stress_score"] = stress_score
+        if clarity_score is not None:
+            snapshot["clarity_score"] = clarity_score
+        if fatigue_risk is not None:
+            snapshot["fatigue_risk"] = fatigue_risk
+            snapshot["fatigue_level"] = _safe_text(payload.get("fatigue_level"), max_length=40).lower() or _derive_guardian_fatigue_level(
+                fatigue_risk
+            )
+        if behavioral_alignment is not None:
+            snapshot["behavioral_alignment"] = behavioral_alignment
+            snapshot["behavioral_level"] = _safe_text(payload.get("behavioral_level"), max_length=40).lower() or _derive_guardian_behavioral_level(
+                behavioral_alignment
+            )
+        if uncertainty_score is not None:
+            snapshot["uncertainty_score"] = uncertainty_score
+            snapshot["confidence_level"] = _safe_text(payload.get("confidence_level"), max_length=40).lower() or _derive_guardian_confidence_level(
+                uncertainty_score
+            )
+        if cognitive_load is not None:
+            snapshot["cognitive_load"] = cognitive_load
+            snapshot["load_level"] = _safe_text(payload.get("load_level"), max_length=40).lower() or _derive_guardian_load_level(
+                cognitive_load
+            )
+        snapshot["state_hint"] = _normalize_guardian_state_hint(payload.get("state_hint")) or _derive_guardian_state_hint(snapshot)
+        snapshot["load_reason"] = _safe_text(payload.get("load_reason"), max_length=220) or _derive_guardian_load_reason(snapshot)
         history = state.get("state_history", [])
         _append_limited(history, snapshot)
         state["state_history"] = history
         state["latest_state"] = snapshot
         state["current_task"] = snapshot.get("current_task", "") or state.get("current_task", "")
+        state["current_course"] = snapshot.get("current_course", "") or state.get("current_course", "")
         state["environment"] = snapshot.get("environment", "") or state.get("environment", "")
+        state["task_mode"] = snapshot.get("task_mode", "") or state.get("task_mode", "")
         state["risk_flags"] = _guardian_risk_flags_from_state(snapshot, state.get("focus_signals", []))
         state["updated_at"] = recorded_at
         mission["learning_state_guardian"] = state
@@ -3136,16 +3644,19 @@ def _build_learning_state_chat_reply(message, mission):
     latest = review.get("latest_state", {}) or {}
     lowered = (message or "").lower()
     if not message:
-        return "Learning-state guardian is online. Tell me your current task, focus, energy, and stress so I can spot the biggest risk."
+        return (
+            "Learning-state guardian is online. Tell me your current task, focus, fatigue, and load so I can spot the biggest risk."
+        )
     if "focus" in lowered or "distracted" in lowered:
         risks = review.get("risk_flags", [])
         if risks:
             return f"The strongest focus signal is: {risks[0]}. Remove one distraction before you keep studying."
         return "Your focus state looks stable enough for another work block. Keep the task narrow and log the next snapshot."
-    if "energy" in lowered or "tired" in lowered:
-        level = latest.get("energy_level", 0)
+    if "energy" in lowered or "tired" in lowered or "fatigue" in lowered:
+        fatigue_risk = latest.get("fatigue_risk")
+        fatigue_level = latest.get("fatigue_level") or "unknown"
         return (
-            f"Your latest energy level is {level}/5. "
+            f"Your latest fatigue signal is {fatigue_risk if fatigue_risk is not None else 'n/a'}/100 ({fatigue_level}). "
             "If that feels accurate, shorten the next work block and define one finish line before you continue."
         )
     if "stress" in lowered or "overwhelmed" in lowered:
@@ -3154,9 +3665,31 @@ def _build_learning_state_chat_reply(message, mission):
             f"Your latest stress level is {level}/5. "
             "Reduce the scope to one checkpoint and remove any optional task until that checkpoint is done."
         )
+    if "load" in lowered or "workload" in lowered:
+        cognitive_load = latest.get("cognitive_load")
+        load_level = latest.get("load_level") or "unknown"
+        load_reason = latest.get("load_reason") or review.get("state_classification", {}).get("load_reason", "")
+        return (
+            f"Current cognitive load is {cognitive_load if cognitive_load is not None else 'n/a'}/100 ({load_level}). "
+            f"{load_reason or 'Keep the next study block narrow and re-check after one checkpoint.'}"
+        )
+    if "confidence" in lowered or "uncertain" in lowered or "signal" in lowered:
+        uncertainty_score = latest.get("uncertainty_score")
+        confidence_level = latest.get("confidence_level") or "unknown"
+        return (
+            f"Signal confidence is {confidence_level} with uncertainty at {uncertainty_score if uncertainty_score is not None else 'n/a'}/100. "
+            "Use one more clean snapshot before you make a bigger study decision if the signal still feels noisy."
+        )
+    if "mode" in lowered or "task type" in lowered:
+        task_mode = review.get("task_mode") or "general study"
+        return f"The guardian currently reads this block as {task_mode}. Keep your study behavior matched to that mode for cleaner signals."
     if "task" in lowered or "progress" in lowered or "state" in lowered:
         task = latest.get("current_task") or review.get("current_task") or "your current study task"
-        return f"Stay with {task}. {review.get('coach_message', 'Log one more state snapshot after the next focused block.')}"
+        state_hint = review.get("state_classification", {}).get("state_hint_label") or "current learning state"
+        return (
+            f"Stay with {task}. The guardian reads the state as {state_hint.lower()}. "
+            f"{review.get('coach_message', 'Log one more state snapshot after the next focused block.')}"
+        )
     return review.get("coach_message", "Record one learning-state snapshot so the guardian can identify the next intervention.")
 
 
