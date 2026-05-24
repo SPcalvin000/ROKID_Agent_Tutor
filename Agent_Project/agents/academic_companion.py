@@ -100,6 +100,92 @@ REVIEW_SCOPE_ALIASES = {
     "presentation": "mission",
     "mission": "mission",
 }
+GUARDIAN_TASK_MODE_ALIASES = {
+    "lecture": "lecture",
+    "reading": "reading",
+    "review": "review",
+    "note_taking": "note-taking",
+    "note-taking": "note-taking",
+    "notes": "note-taking",
+}
+GUARDIAN_TASK_MODE_PROFILES = {
+    "lecture": {
+        "load_medium": 44.0,
+        "load_high": 78.0,
+        "fatigue_medium": 34.0,
+        "fatigue_high": 60.0,
+        "behavioral_drifting": 68.0,
+        "behavioral_misaligned": 40.0,
+        "uncertainty_medium": 30.0,
+        "uncertainty_high": 54.0,
+        "productive_alignment": 74.0,
+        "productive_load_low": 30.0,
+        "productive_load_high": 66.0,
+        "switching_high": 76.0,
+        "drift_rising": 30.0,
+    },
+    "reading": {
+        "load_medium": 46.0,
+        "load_high": 78.0,
+        "fatigue_medium": 38.0,
+        "fatigue_high": 65.0,
+        "behavioral_drifting": 72.0,
+        "behavioral_misaligned": 42.0,
+        "uncertainty_medium": 34.0,
+        "uncertainty_high": 55.0,
+        "productive_alignment": 76.0,
+        "productive_load_low": 35.0,
+        "productive_load_high": 72.0,
+        "switching_high": 72.0,
+        "drift_rising": 32.0,
+    },
+    "note-taking": {
+        "load_medium": 50.0,
+        "load_high": 82.0,
+        "fatigue_medium": 40.0,
+        "fatigue_high": 67.0,
+        "behavioral_drifting": 64.0,
+        "behavioral_misaligned": 36.0,
+        "uncertainty_medium": 36.0,
+        "uncertainty_high": 58.0,
+        "productive_alignment": 70.0,
+        "productive_load_low": 38.0,
+        "productive_load_high": 76.0,
+        "switching_high": 80.0,
+        "drift_rising": 36.0,
+    },
+    "review": {
+        "load_medium": 48.0,
+        "load_high": 80.0,
+        "fatigue_medium": 38.0,
+        "fatigue_high": 64.0,
+        "behavioral_drifting": 68.0,
+        "behavioral_misaligned": 40.0,
+        "uncertainty_medium": 34.0,
+        "uncertainty_high": 56.0,
+        "productive_alignment": 74.0,
+        "productive_load_low": 34.0,
+        "productive_load_high": 72.0,
+        "switching_high": 76.0,
+        "drift_rising": 34.0,
+    },
+}
+GUARDIAN_STATE_HINT_ALIASES = {
+    "stable": "stable",
+    "load_rising": "load_rising",
+    "fatigue_risk": "fatigue_risk",
+    "off_task_risk": "off_task_risk",
+    "productive_struggle": "productive_struggle",
+    "signal_check": "signal_check",
+}
+GUARDIAN_STATE_HINT_LABELS = {
+    "stable": "Stable learning state",
+    "load_rising": "Load rising",
+    "fatigue_risk": "Fatigue risk rising",
+    "off_task_risk": "Off-task risk",
+    "productive_struggle": "Productive struggle",
+    "signal_check": "Signal quality check",
+}
 GUARDIAN_CHALLENGE_ALIASES = {
     "look_away": "attention drift",
     "attention_drop": "attention drift",
@@ -112,6 +198,42 @@ GUARDIAN_CHALLENGE_ALIASES = {
     "hesitation": "task hesitation",
     "long_pause": "task hesitation",
     "lost_track": "lost task thread",
+}
+GUARDIAN_SWITCH_SIGNAL_WEIGHTS = {
+    "attention drift": 18.0,
+    "context switching": 28.0,
+    "notification distraction": 22.0,
+    "fatigue signal": 18.0,
+    "low energy": 16.0,
+    "task hesitation": 16.0,
+    "lost task thread": 20.0,
+}
+GUARDIAN_SENSOR_FIELD_ALIASES = {
+    "stability": ("stability", "stability_score"),
+    "relative_pitch": ("relative_pitch", "pitch_drift"),
+    "signed_pitch_delta": ("signed_pitch_delta",),
+    "relative_yaw": ("relative_yaw", "yaw_drift"),
+    "relative_roll": ("relative_roll", "roll_drift"),
+    "combined_drift": ("combined_drift", "drift_score", "drift"),
+    "orientation_drift": ("orientation_drift",),
+    "movement_intensity": ("movement_intensity", "motion_intensity"),
+    "drift_trend": ("drift_trend",),
+    "switching_index": ("switching_index",),
+    "scene_content_score": ("scene_content_score",),
+    "scene_text_score": ("scene_text_score", "text_presence_score"),
+    "scene_stability_score": ("scene_stability_score",),
+    "scene_switch_rate": ("scene_switch_rate",),
+    "study_surface_score": ("study_surface_score",),
+    "scene_lock_score": ("scene_lock_score",),
+    "blur_score": ("blur_score",),
+    "brightness_score": ("brightness_score",),
+    "external_uncertainty": ("external_uncertainty",),
+    "scene_signal_active": ("scene_signal_active",),
+}
+GUARDIAN_DIFFICULTY_TRIGGER_COUNTS = {
+    "medium": 3,
+    "high": 2,
+    "resolve": 2,
 }
 OPERATION_ALIASES = {
     CAPABILITY_PRESENTATION: {
@@ -227,6 +349,26 @@ def _infer_capability_from_payload(payload, event_type=""):
         "attention_score",
         "focus_score",
         "focus_level",
+        "cognitive_load",
+        "behavioral_alignment",
+        "fatigue_risk",
+        "uncertainty_score",
+        "task_mode",
+        "state_hint",
+        "stability",
+        "combined_drift",
+        "orientation_drift",
+        "movement_intensity",
+        "switching_index",
+        "drift_trend",
+        "scene_text_score",
+        "scene_stability_score",
+        "scene_switch_rate",
+        "study_surface_score",
+        "scene_lock_score",
+        "blur_score",
+        "brightness_score",
+        "external_uncertainty",
         "energy_level",
         "fatigue_score",
         "stress_level",
@@ -313,6 +455,36 @@ def _score_to_level(value, invert=False):
     return 5
 
 
+def _safe_score_100(value, default=0.0):
+    return round(max(0.0, min(100.0, _safe_float(value, default=default))), 1)
+
+
+def _optional_score_100(value):
+    if value in (None, ""):
+        return None
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return None
+    return round(max(0.0, min(100.0, score)), 1)
+
+
+def _level_to_score(value, invert=False):
+    if value in (None, ""):
+        return None
+    try:
+        level = int(value)
+    except (TypeError, ValueError):
+        return None
+    if level <= 0:
+        return None
+    level = max(1, min(5, level))
+    score = round(((level - 1) / 4.0) * 100.0, 1)
+    if invert:
+        return round(100.0 - score, 1)
+    return score
+
+
 def _normalize_control_action(value):
     normalized = _safe_text(value, max_length=80).lower()
     if not normalized:
@@ -332,6 +504,663 @@ def _normalize_guardian_challenge(value):
     if not normalized:
         return ""
     return GUARDIAN_CHALLENGE_ALIASES.get(normalized, normalized.replace("_", " "))
+
+
+def _normalize_guardian_task_mode(value):
+    normalized = _safe_text(value, max_length=80).lower()
+    if not normalized:
+        return ""
+    return GUARDIAN_TASK_MODE_ALIASES.get(normalized, normalized.replace("_", "-"))
+
+
+def _guardian_task_profile(task_mode):
+    normalized = _normalize_guardian_task_mode(task_mode) or "reading"
+    return GUARDIAN_TASK_MODE_PROFILES.get(normalized, GUARDIAN_TASK_MODE_PROFILES["reading"])
+
+
+def _normalize_guardian_state_hint(value):
+    normalized = _safe_text(value, max_length=80).lower()
+    if not normalized:
+        return ""
+    return GUARDIAN_STATE_HINT_ALIASES.get(normalized, normalized.replace(" ", "_"))
+
+
+def _guardian_state_hint_label(value):
+    normalized = _normalize_guardian_state_hint(value) or "stable"
+    return GUARDIAN_STATE_HINT_LABELS.get(normalized, normalized.replace("_", " ").title())
+
+
+def _derive_guardian_load_level(cognitive_load, task_mode=""):
+    score = _safe_score_100(cognitive_load, default=0.0)
+    profile = _guardian_task_profile(task_mode)
+    if score >= profile["load_high"]:
+        return "high"
+    if score >= profile["load_medium"]:
+        return "medium"
+    return "low"
+
+
+def _derive_guardian_fatigue_level(fatigue_risk, task_mode=""):
+    score = _safe_score_100(fatigue_risk, default=0.0)
+    profile = _guardian_task_profile(task_mode)
+    if score >= profile["fatigue_high"]:
+        return "high"
+    if score >= profile["fatigue_medium"]:
+        return "medium"
+    return "low"
+
+
+def _derive_guardian_behavioral_level(behavioral_alignment, task_mode=""):
+    score = _safe_score_100(behavioral_alignment, default=100.0)
+    profile = _guardian_task_profile(task_mode)
+    if score < profile["behavioral_misaligned"]:
+        return "misaligned"
+    if score < profile["behavioral_drifting"]:
+        return "drifting"
+    return "aligned"
+
+
+def _derive_guardian_confidence_level(uncertainty_score, task_mode=""):
+    score = _safe_score_100(uncertainty_score, default=35.0)
+    profile = _guardian_task_profile(task_mode)
+    if score >= profile["uncertainty_high"]:
+        return "low"
+    if score >= profile["uncertainty_medium"]:
+        return "medium"
+    return "high"
+
+
+def _derive_guardian_state_hint(snapshot):
+    if not isinstance(snapshot, dict):
+        return "stable"
+    task_mode = _normalize_guardian_task_mode(snapshot.get("task_mode")) or "reading"
+    profile = _guardian_task_profile(task_mode)
+    fatigue_risk = _safe_score_100(snapshot.get("fatigue_risk"), default=0.0)
+    uncertainty_score = _safe_score_100(snapshot.get("uncertainty_score"), default=profile["uncertainty_medium"])
+    behavioral_alignment = _safe_score_100(snapshot.get("behavioral_alignment"), default=100.0)
+    cognitive_load = _safe_score_100(snapshot.get("cognitive_load"), default=0.0)
+    switching_index = _safe_score_100(snapshot.get("switching_index"), default=0.0)
+    drift_trend = _safe_score_100(snapshot.get("drift_trend"), default=0.0)
+    behavioral_level = _safe_text(snapshot.get("behavioral_level"), max_length=40).lower() or _derive_guardian_behavioral_level(
+        behavioral_alignment,
+        task_mode=task_mode,
+    )
+
+    if uncertainty_score >= profile["uncertainty_high"]:
+        return "signal_check"
+    if fatigue_risk >= profile["fatigue_high"] or (drift_trend >= 55 and fatigue_risk >= profile["fatigue_medium"]):
+        return "fatigue_risk"
+    if (
+        behavioral_level == "misaligned"
+        or behavioral_alignment < profile["behavioral_misaligned"]
+        or switching_index >= profile["switching_high"]
+        or cognitive_load >= profile["load_high"]
+    ):
+        return "off_task_risk"
+    if (
+        behavioral_alignment >= profile["productive_alignment"]
+        and fatigue_risk < profile["fatigue_medium"]
+        and uncertainty_score < profile["uncertainty_medium"]
+        and profile["productive_load_low"] <= cognitive_load <= profile["productive_load_high"]
+        and switching_index < max(20.0, profile["switching_high"] * 0.55)
+    ):
+        return "productive_struggle"
+    if (
+        behavioral_level == "drifting"
+        or behavioral_alignment < profile["behavioral_drifting"]
+        or cognitive_load >= profile["load_medium"]
+        or drift_trend >= profile["drift_rising"]
+    ):
+        return "load_rising"
+    return "stable"
+
+
+def _derive_guardian_load_reason(snapshot):
+    if not isinstance(snapshot, dict):
+        return "Stable learning state"
+    task_mode = _normalize_guardian_task_mode(snapshot.get("task_mode")) or "reading"
+    fatigue_level = _safe_text(snapshot.get("fatigue_level"), max_length=40).lower() or _derive_guardian_fatigue_level(
+        snapshot.get("fatigue_risk"),
+        task_mode=task_mode,
+    )
+    uncertainty_score = _safe_score_100(snapshot.get("uncertainty_score"), default=_guardian_task_profile(task_mode)["uncertainty_medium"])
+    state_hint = _safe_text(snapshot.get("state_hint"), max_length=80).lower() or _derive_guardian_state_hint(snapshot)
+    cognitive_load = _safe_score_100(snapshot.get("cognitive_load"), default=0.0)
+    switching_index = _safe_score_100(snapshot.get("switching_index"), default=0.0)
+    behavioral_level = _safe_text(snapshot.get("behavioral_level"), max_length=40).lower() or _derive_guardian_behavioral_level(
+        snapshot.get("behavioral_alignment"),
+        task_mode=task_mode,
+    )
+
+    if fatigue_level == "high":
+        return f"Fatigue is becoming the main limiter during this {task_mode} block"
+    if uncertainty_score >= _guardian_task_profile(task_mode)["uncertainty_high"]:
+        return "Signal warming up or mode transition"
+    if state_hint == "productive_struggle":
+        return f"Effort is high but still aligned for this {task_mode} block"
+    if switching_index >= _guardian_task_profile(task_mode)["switching_high"]:
+        return f"Frequent task switching is disrupting {task_mode} flow"
+    if state_hint == "off_task_risk" or cognitive_load >= _guardian_task_profile(task_mode)["load_high"] or behavioral_level == "misaligned":
+        return f"Behavior is drifting away from the expected {task_mode} pattern"
+    if cognitive_load >= _guardian_task_profile(task_mode)["load_medium"] or behavioral_level == "drifting":
+        return f"{task_mode.title()} effort is rising and needs tighter regulation"
+    return "Stable learning state"
+
+
+def _guardian_numeric_average(items, field):
+    values = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        value = item.get(field)
+        if value in (None, ""):
+            continue
+        values.append(_safe_float(value, default=0.0))
+    if not values:
+        return 0.0
+    return round(sum(values) / len(values), 1)
+
+
+def _weighted_average(pairs):
+    total_weight = 0.0
+    total_value = 0.0
+    for value, weight in pairs:
+        if value is None or weight <= 0:
+            continue
+        total_weight += float(weight)
+        total_value += float(value) * float(weight)
+    if total_weight <= 0:
+        return None
+    return round(total_value / total_weight, 1)
+
+
+def _guardian_metric_trend(items, field, higher_is_better=True, threshold=6.0):
+    values = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        value = item.get(field)
+        if value in (None, ""):
+            continue
+        values.append(_safe_float(value, default=0.0))
+    if len(values) < 2:
+        return {"direction": "stable", "delta": 0.0}
+    delta = round(values[-1] - values[0], 1)
+    if abs(delta) < threshold:
+        return {"direction": "stable", "delta": delta}
+    if higher_is_better:
+        return {"direction": "improving" if delta > 0 else "worsening", "delta": delta}
+    return {"direction": "improving" if delta < 0 else "worsening", "delta": delta}
+
+
+def _extract_guardian_sensor_fields(payload):
+    payload = _ensure_payload_dict(payload)
+    extracted = {}
+    for field, aliases in GUARDIAN_SENSOR_FIELD_ALIASES.items():
+        value = _first_present_value(payload, aliases)
+        if value is None:
+            continue
+        if field == "scene_signal_active":
+            extracted[field] = _safe_bool(value, default=False)
+            continue
+        parsed = _optional_score_100(value)
+        if parsed is not None:
+            extracted[field] = parsed
+    return extracted
+
+
+def _guardian_sensor_snapshot_payload(snapshot):
+    snapshot = _ensure_payload_dict(snapshot)
+    result = {}
+    for field in GUARDIAN_SENSOR_FIELD_ALIASES:
+        value = snapshot.get(field)
+        if field == "scene_signal_active":
+            if isinstance(value, bool):
+                result[field] = value
+            continue
+        if value in (None, ""):
+            continue
+        result[field] = value
+    return result
+
+
+def _compute_guardian_switching_index(snapshot, focus_signals):
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    focus_signals = focus_signals if isinstance(focus_signals, list) else []
+    score = 0.0
+    for item in focus_signals[-6:]:
+        if not isinstance(item, dict):
+            continue
+        signal_type = _normalize_guardian_challenge(item.get("signal_type"))
+        weight = GUARDIAN_SWITCH_SIGNAL_WEIGHTS.get(signal_type, 0.0)
+        if weight <= 0:
+            continue
+        severity = _normalize_severity(item.get("severity"))
+        multiplier = 1.0 if severity == "high" else 0.75 if severity == "medium" else 0.45
+        if _safe_bool(item.get("resolved"), default=False):
+            multiplier *= 0.45
+        score += weight * multiplier
+    if snapshot.get("distraction"):
+        score += 16.0
+    signal_score = round(max(0.0, min(100.0, score)), 1)
+    scene_switch_rate = _optional_score_100(snapshot.get("scene_switch_rate"))
+    movement_intensity = _optional_score_100(snapshot.get("movement_intensity"))
+    combined_drift = _optional_score_100(snapshot.get("combined_drift"))
+    derived = _weighted_average(
+        [
+            (signal_score, 0.46),
+            (scene_switch_rate, 0.28),
+            (movement_intensity, 0.16),
+            (combined_drift, 0.10),
+        ]
+    )
+    if derived is None:
+        return signal_score
+    return round(max(0.0, min(100.0, derived)), 1)
+
+
+def _compute_guardian_drift_trend(snapshot, recent_history):
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    recent_history = [item for item in (recent_history or []) if isinstance(item, dict)]
+    combined_drift = _optional_score_100(snapshot.get("combined_drift"))
+    orientation_drift = _optional_score_100(snapshot.get("orientation_drift"))
+    movement_intensity = _optional_score_100(snapshot.get("movement_intensity"))
+    switching_index = _optional_score_100(snapshot.get("switching_index"))
+    if not recent_history:
+        baseline = _weighted_average(
+            [
+                (combined_drift, 0.34),
+                (orientation_drift, 0.26),
+                (switching_index, 0.22),
+                (movement_intensity, 0.18),
+            ]
+        )
+        if baseline is None:
+            baseline = 0.0
+            if _safe_text(snapshot.get("behavioral_level"), max_length=40).lower() == "drifting":
+                baseline += 18.0
+            if _safe_text(snapshot.get("behavioral_level"), max_length=40).lower() == "misaligned":
+                baseline += 28.0
+            if _safe_text(snapshot.get("load_level"), max_length=40).lower() == "medium":
+                baseline += 14.0
+            if _safe_text(snapshot.get("load_level"), max_length=40).lower() == "high":
+                baseline += 24.0
+        return round(min(100.0, baseline), 1)
+
+    previous = recent_history[-1]
+    focus_drop = max(0.0, _safe_float(previous.get("focus_score"), default=0.0) - _safe_float(snapshot.get("focus_score"), default=0.0))
+    load_rise = max(0.0, _safe_float(snapshot.get("cognitive_load"), default=0.0) - _safe_float(previous.get("cognitive_load"), default=0.0))
+    alignment_drop = max(
+        0.0,
+        _safe_float(previous.get("behavioral_alignment"), default=100.0) - _safe_float(snapshot.get("behavioral_alignment"), default=100.0),
+    )
+    fatigue_rise = max(0.0, _safe_float(snapshot.get("fatigue_risk"), default=0.0) - _safe_float(previous.get("fatigue_risk"), default=0.0))
+    drift_change = max(0.0, combined_drift - _safe_float(previous.get("combined_drift"), default=0.0)) if combined_drift is not None else 0.0
+    trend = (focus_drop * 0.24) + (load_rise * 0.22) + (alignment_drop * 0.18) + (fatigue_rise * 0.12) + (drift_change * 0.24)
+    return round(max(0.0, min(100.0, trend)), 1)
+
+
+def _finalize_guardian_snapshot(snapshot, recent_history=None, focus_signals=None):
+    snapshot = copy.deepcopy(_ensure_payload_dict(snapshot))
+    snapshot.update(_extract_guardian_sensor_fields(snapshot))
+    task_mode = _normalize_guardian_task_mode(snapshot.get("task_mode")) or "reading"
+    snapshot["task_mode"] = task_mode
+    scene_signal_active = _safe_bool(
+        snapshot.get("scene_signal_active"),
+        default=bool(_guardian_sensor_snapshot_payload(snapshot)),
+    )
+    snapshot["scene_signal_active"] = scene_signal_active
+
+    stability = _optional_score_100(snapshot.get("stability"))
+    combined_drift = _optional_score_100(snapshot.get("combined_drift"))
+    orientation_drift = _optional_score_100(snapshot.get("orientation_drift"))
+    movement_intensity = _optional_score_100(snapshot.get("movement_intensity"))
+    scene_text_score = _optional_score_100(snapshot.get("scene_text_score"))
+    scene_stability_score = _optional_score_100(snapshot.get("scene_stability_score"))
+    scene_switch_rate = _optional_score_100(snapshot.get("scene_switch_rate"))
+    study_surface_score = _optional_score_100(snapshot.get("study_surface_score"))
+    scene_lock_score = _optional_score_100(snapshot.get("scene_lock_score"))
+    blur_score = _optional_score_100(snapshot.get("blur_score"))
+    brightness_score = _optional_score_100(snapshot.get("brightness_score"))
+    external_uncertainty = _optional_score_100(snapshot.get("external_uncertainty"))
+
+    focus_score = _optional_score_100(snapshot.get("focus_score"))
+    if focus_score is None:
+        focus_score = _level_to_score(snapshot.get("focus_level"))
+
+    stress_score = _optional_score_100(snapshot.get("stress_score"))
+    if stress_score is None:
+        stress_score = _level_to_score(snapshot.get("stress_level"))
+    if stress_score is not None:
+        snapshot["stress_score"] = stress_score
+
+    clarity_score = _optional_score_100(snapshot.get("clarity_score"))
+    if clarity_score is None:
+        clarity_score = _level_to_score(snapshot.get("comprehension_level"))
+    if clarity_score is not None:
+        snapshot["clarity_score"] = clarity_score
+
+    fatigue_risk = _optional_score_100(snapshot.get("fatigue_risk"))
+    if fatigue_risk is None:
+        fatigue_risk = _level_to_score(snapshot.get("energy_level"), invert=True)
+    if fatigue_risk is not None:
+        snapshot["fatigue_risk"] = fatigue_risk
+
+    behavioral_alignment = _optional_score_100(snapshot.get("behavioral_alignment"))
+    if behavioral_alignment is None and focus_score is not None:
+        penalty = 0.0
+        if snapshot.get("distraction"):
+            penalty += 24.0
+        if snapshot.get("support_needed"):
+            penalty += 10.0
+        behavioral_alignment = round(max(0.0, focus_score - penalty), 1)
+    if behavioral_alignment is None:
+        behavioral_alignment = _weighted_average(
+            [
+                (max(0.0, 100.0 - (orientation_drift or 0.0)) if orientation_drift is not None else None, 0.24),
+                (max(0.0, 100.0 - (scene_switch_rate or 0.0)) if scene_switch_rate is not None else None, 0.14),
+                (max(0.0, 100.0 - (combined_drift or 0.0)) if combined_drift is not None else None, 0.12),
+                (max(0.0, 100.0 - (movement_intensity or 0.0)) if movement_intensity is not None else None, 0.10),
+                (scene_lock_score, 0.18),
+                (study_surface_score, 0.14),
+                (scene_stability_score, 0.08),
+                (stability, 0.10),
+            ]
+        )
+    if behavioral_alignment is not None:
+        snapshot["behavioral_alignment"] = behavioral_alignment
+
+    uncertainty_score = _optional_score_100(snapshot.get("uncertainty_score"))
+    if uncertainty_score is None:
+        confidence_score = _optional_score_100(snapshot.get("confidence_score"))
+        if confidence_score is not None:
+            uncertainty_score = round(max(0.0, 100.0 - confidence_score), 1)
+        elif clarity_score is not None:
+            uncertainty_score = round(
+                max(0.0, min(100.0, 100.0 - clarity_score + (10.0 if snapshot.get("support_needed") else 0.0))),
+                1,
+            )
+    if uncertainty_score is None:
+        blur_penalty = None if blur_score is None else round(max(0.0, min(100.0, (22.0 - blur_score) * 4.5)), 1)
+        brightness_penalty = None
+        if brightness_score is not None:
+            if brightness_score < 14.0:
+                brightness_penalty = round(min(100.0, (14.0 - brightness_score) * 5.2), 1)
+            elif brightness_score > 88.0:
+                brightness_penalty = round(min(100.0, (brightness_score - 88.0) * 4.8), 1)
+            else:
+                brightness_penalty = 0.0
+        uncertainty_score = _weighted_average(
+            [
+                (external_uncertainty, 0.28),
+                (blur_penalty, 0.14),
+                (brightness_penalty, 0.10),
+                (max(0.0, 100.0 - (scene_stability_score or 100.0)) if scene_stability_score is not None else None, 0.16),
+                (max(0.0, 100.0 - (study_surface_score or 100.0)) if study_surface_score is not None else None, 0.10),
+                (max(0.0, 100.0 - (scene_lock_score or 100.0)) if scene_lock_score is not None else None, 0.08),
+                (max(0.0, 100.0 - (clarity_score or 100.0)) if clarity_score is not None else None, 0.06),
+                (movement_intensity, 0.04),
+                (orientation_drift, 0.04),
+            ]
+        )
+        if uncertainty_score is not None and scene_signal_active and scene_lock_score is not None:
+            uncertainty_score = round(max(0.0, uncertainty_score - (scene_lock_score * 0.06)), 1)
+    if uncertainty_score is not None:
+        snapshot["uncertainty_score"] = uncertainty_score
+
+    cognitive_load = _optional_score_100(snapshot.get("cognitive_load"))
+    if cognitive_load is None:
+        components = []
+        if stress_score is not None:
+            components.append(stress_score * 0.55)
+        if clarity_score is not None:
+            components.append((100.0 - clarity_score) * 0.35)
+        if snapshot.get("distraction"):
+            components.append(12.0)
+        if snapshot.get("support_needed"):
+            components.append(8.0)
+        if components:
+            cognitive_load = round(max(0.0, min(100.0, sum(components))), 1)
+    if cognitive_load is None:
+        cognitive_load = _weighted_average(
+            [
+                (stress_score, 0.22),
+                (fatigue_risk, 0.14),
+                (max(0.0, 100.0 - (clarity_score or 100.0)) if clarity_score is not None else None, 0.14),
+                (orientation_drift, 0.14),
+                (movement_intensity, 0.08),
+                (scene_switch_rate, 0.10),
+                (max(0.0, 100.0 - (scene_stability_score or 100.0)) if scene_stability_score is not None else None, 0.08),
+                (max(0.0, 100.0 - (scene_lock_score or 100.0)) if scene_lock_score is not None else None, 0.06),
+                (max(0.0, 100.0 - (study_surface_score or 100.0)) if study_surface_score is not None else None, 0.04),
+            ]
+        )
+    if cognitive_load is not None:
+        snapshot["cognitive_load"] = cognitive_load
+
+    if focus_score is None and behavioral_alignment is not None and cognitive_load is not None:
+        focus_score = round(max(0.0, min(100.0, (behavioral_alignment * 0.65) + ((100.0 - cognitive_load) * 0.35))), 1)
+    if focus_score is not None:
+        snapshot["focus_score"] = focus_score
+
+    snapshot["behavioral_level"] = _safe_text(snapshot.get("behavioral_level"), max_length=40).lower() or _derive_guardian_behavioral_level(
+        snapshot.get("behavioral_alignment"),
+        task_mode=task_mode,
+    )
+    snapshot["fatigue_level"] = _safe_text(snapshot.get("fatigue_level"), max_length=40).lower() or _derive_guardian_fatigue_level(
+        snapshot.get("fatigue_risk"),
+        task_mode=task_mode,
+    )
+    snapshot["confidence_level"] = _safe_text(snapshot.get("confidence_level"), max_length=40).lower() or _derive_guardian_confidence_level(
+        snapshot.get("uncertainty_score"),
+        task_mode=task_mode,
+    )
+    snapshot["load_level"] = _safe_text(snapshot.get("load_level"), max_length=40).lower() or _derive_guardian_load_level(
+        snapshot.get("cognitive_load"),
+        task_mode=task_mode,
+    )
+    snapshot["switching_index"] = _safe_score_100(
+        snapshot.get("switching_index"),
+        default=_compute_guardian_switching_index(snapshot, focus_signals),
+    )
+    snapshot["drift_trend"] = _safe_score_100(
+        snapshot.get("drift_trend"),
+        default=_compute_guardian_drift_trend(snapshot, recent_history),
+    )
+    snapshot["state_hint"] = _normalize_guardian_state_hint(snapshot.get("state_hint")) or _derive_guardian_state_hint(snapshot)
+    snapshot["load_reason"] = _safe_text(snapshot.get("load_reason"), max_length=220) or _derive_guardian_load_reason(snapshot)
+    return snapshot
+
+
+def _default_guardian_difficulty_tracker():
+    return {
+        "event_counter": 0,
+        "candidate_label": "",
+        "candidate_reason": "",
+        "candidate_rank": 0,
+        "candidate_count": 0,
+        "stable_count": 0,
+        "active_event": {},
+    }
+
+
+def _guardian_event_status(rank):
+    if rank >= 2:
+        return "high"
+    if rank == 1:
+        return "medium"
+    return "low"
+
+
+def _guardian_event_review_note(event):
+    if _safe_text(event.get("primary_label"), max_length=80).lower() == "productive struggle":
+        return "Review this segment as a challenge point: effort stayed aligned, so the difficulty is likely conceptual rather than pure distraction."
+    if event.get("severity") == "high":
+        return "Review this segment first: load rose enough to trigger a high-priority study-state event."
+    return "Review this segment: sustained rising load suggests a meaningful learning-state difficulty point."
+
+
+def _guardian_difficulty_public_event(event, status="active"):
+    event = event if isinstance(event, dict) else {}
+    if not event:
+        return {}
+    return {
+        "event_id": _safe_int(event.get("event_id"), default=0),
+        "status": status,
+        "severity": _safe_text(event.get("severity"), max_length=20) or "medium",
+        "primary_label": _safe_text(event.get("primary_label"), max_length=120),
+        "trigger_reason": _safe_text(event.get("trigger_reason"), max_length=220),
+        "start_timestamp": _safe_text(event.get("start_timestamp"), max_length=40),
+        "end_timestamp": _safe_text(event.get("end_timestamp"), max_length=40),
+        "sample_count": _safe_int(event.get("sample_count"), default=0),
+        "task_mode": _safe_text(event.get("task_mode"), max_length=40),
+        "peak_load": _optional_score_100(event.get("peak_load")),
+        "min_focus": _optional_score_100(event.get("min_focus")),
+        "highest_switching_index": _optional_score_100(event.get("highest_switching_index")),
+        "review_note": _safe_text(event.get("review_note"), max_length=260) or _guardian_event_review_note(event),
+    }
+
+
+def _guardian_event_rank(snapshot, signal=None):
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    signal = signal if isinstance(signal, dict) else {}
+    task_mode = _normalize_guardian_task_mode(snapshot.get("task_mode")) or "reading"
+    profile = _guardian_task_profile(task_mode)
+    state_hint = _normalize_guardian_state_hint(snapshot.get("state_hint"))
+    load_level = _safe_text(snapshot.get("load_level"), max_length=40).lower()
+    fatigue_level = _safe_text(snapshot.get("fatigue_level"), max_length=40).lower()
+    switching_index = _safe_score_100(snapshot.get("switching_index"), default=0.0)
+    signal_severity = _normalize_severity(signal.get("severity")) if signal else "low"
+    signal_type = _normalize_guardian_challenge(signal.get("signal_type")) if signal else ""
+    label = _guardian_state_hint_label(state_hint)
+    reason = _safe_text(snapshot.get("load_reason"), max_length=220)
+
+    if state_hint == "productive_struggle":
+        return 1, "Productive struggle", reason or "Effort is high but still aligned."
+    if (
+        load_level == "high"
+        or fatigue_level == "high"
+        or switching_index >= profile["switching_high"]
+        or signal_severity == "high"
+        or state_hint in {"fatigue_risk", "off_task_risk"}
+    ):
+        if signal_type:
+            label = signal_type.title()
+        return 2, label, reason
+    if (
+        load_level == "medium"
+        or fatigue_level == "medium"
+        or signal_severity == "medium"
+        or state_hint in {"load_rising", "signal_check"}
+    ):
+        if signal_type and label == "Stable learning state":
+            label = signal_type.title()
+        return 1, label, reason
+    return 0, label, reason
+
+
+def _update_guardian_difficulty_tracking(state, snapshot=None, signal=None, recorded_at=""):
+    state = _ensure_payload_dict(state)
+    tracker = state.get("difficulty_tracker")
+    if not isinstance(tracker, dict):
+        tracker = _default_guardian_difficulty_tracker()
+    else:
+        defaults = _default_guardian_difficulty_tracker()
+        for key, value in defaults.items():
+            tracker.setdefault(key, copy.deepcopy(value))
+    events = [item for item in state.get("difficulty_events", []) if isinstance(item, dict)]
+
+    latest_snapshot = snapshot if isinstance(snapshot, dict) else _ensure_payload_dict(state.get("latest_state"))
+    rank, label, reason = _guardian_event_rank(latest_snapshot, signal=signal)
+    severity = _guardian_event_status(rank)
+    timestamp = _safe_text(recorded_at, max_length=40) or _now_iso()
+
+    active_event = tracker.get("active_event") if isinstance(tracker.get("active_event"), dict) else {}
+    if not active_event:
+        if rank == 0:
+            tracker["candidate_label"] = ""
+            tracker["candidate_reason"] = ""
+            tracker["candidate_rank"] = 0
+            tracker["candidate_count"] = 0
+            tracker["stable_count"] = tracker.get("stable_count", 0) + 1
+            tracker["active_event"] = {}
+            state["difficulty_tracker"] = tracker
+            state["difficulty_events"] = events[-MAX_HISTORY:]
+            return None
+
+        if label == tracker.get("candidate_label"):
+            tracker["candidate_count"] = _safe_int(tracker.get("candidate_count"), default=0) + 1
+        else:
+            tracker["candidate_label"] = label
+            tracker["candidate_reason"] = reason
+            tracker["candidate_count"] = 1
+        tracker["candidate_rank"] = max(_safe_int(tracker.get("candidate_rank"), default=0), rank)
+        tracker["candidate_reason"] = reason or tracker.get("candidate_reason", "")
+        tracker["stable_count"] = 0
+
+        trigger_key = "high" if tracker["candidate_rank"] >= 2 else "medium"
+        if tracker["candidate_count"] >= GUARDIAN_DIFFICULTY_TRIGGER_COUNTS[trigger_key]:
+            tracker["event_counter"] = _safe_int(tracker.get("event_counter"), default=0) + 1
+            tracker["active_event"] = {
+                "event_id": tracker["event_counter"],
+                "severity": "high" if tracker["candidate_rank"] >= 2 else "medium",
+                "primary_label": tracker.get("candidate_label") or label,
+                "trigger_reason": tracker.get("candidate_reason") or reason,
+                "start_timestamp": timestamp,
+                "end_timestamp": timestamp,
+                "sample_count": 1,
+                "task_mode": _safe_text(latest_snapshot.get("task_mode"), max_length=40),
+                "peak_load": _safe_score_100(latest_snapshot.get("cognitive_load"), default=0.0),
+                "min_focus": _safe_score_100(latest_snapshot.get("focus_score"), default=100.0),
+                "highest_switching_index": _safe_score_100(latest_snapshot.get("switching_index"), default=0.0),
+            }
+            tracker["candidate_label"] = ""
+            tracker["candidate_reason"] = ""
+            tracker["candidate_rank"] = 0
+            tracker["candidate_count"] = 0
+        state["difficulty_tracker"] = tracker
+        state["difficulty_events"] = events[-MAX_HISTORY:]
+        return _guardian_difficulty_public_event(tracker.get("active_event", {}), status="active")
+
+    active_event["end_timestamp"] = timestamp
+    active_event["sample_count"] = _safe_int(active_event.get("sample_count"), default=0) + 1
+    active_event["peak_load"] = max(
+        _safe_float(active_event.get("peak_load"), default=0.0),
+        _safe_float(latest_snapshot.get("cognitive_load"), default=0.0),
+    )
+    active_event["min_focus"] = min(
+        _safe_float(active_event.get("min_focus"), default=100.0),
+        _safe_float(latest_snapshot.get("focus_score"), default=100.0),
+    )
+    active_event["highest_switching_index"] = max(
+        _safe_float(active_event.get("highest_switching_index"), default=0.0),
+        _safe_float(latest_snapshot.get("switching_index"), default=0.0),
+    )
+    if rank >= 2:
+        active_event["severity"] = "high"
+    if rank > 0 and label:
+        active_event["primary_label"] = label
+    if rank > 0 and reason:
+        active_event["trigger_reason"] = reason
+
+    if rank == 0:
+        tracker["stable_count"] = _safe_int(tracker.get("stable_count"), default=0) + 1
+        if tracker["stable_count"] >= GUARDIAN_DIFFICULTY_TRIGGER_COUNTS["resolve"]:
+            resolved_event = copy.deepcopy(active_event)
+            resolved_event["review_note"] = _guardian_event_review_note(resolved_event)
+            _append_limited(events, resolved_event)
+            tracker["active_event"] = {}
+            tracker["stable_count"] = 0
+            state["difficulty_events"] = events[-MAX_HISTORY:]
+            state["difficulty_tracker"] = tracker
+            return _guardian_difficulty_public_event(resolved_event, status="resolved")
+    else:
+        tracker["stable_count"] = 0
+        tracker["active_event"] = active_event
+
+    state["difficulty_events"] = events[-MAX_HISTORY:]
+    state["difficulty_tracker"] = tracker
+    return _guardian_difficulty_public_event(active_event, status="active")
 
 
 def _interface_contract(capability, event_type, operation=""):
@@ -570,6 +1399,26 @@ def _normalize_guardian_payload(payload, event_type):
                     "focus_level",
                     "focus",
                     "attention_score",
+                    "focus_score",
+                    "cognitive_load",
+                    "behavioral_alignment",
+                    "fatigue_risk",
+                    "uncertainty_score",
+                    "state_hint",
+                    "stability",
+                    "combined_drift",
+                    "orientation_drift",
+                    "movement_intensity",
+                    "switching_index",
+                    "drift_trend",
+                    "scene_text_score",
+                    "scene_stability_score",
+                    "scene_switch_rate",
+                    "study_surface_score",
+                    "scene_lock_score",
+                    "blur_score",
+                    "brightness_score",
+                    "external_uncertainty",
                     "energy_level",
                     "energy",
                     "fatigue_score",
@@ -579,7 +1428,7 @@ def _normalize_guardian_payload(payload, event_type):
                 ),
             ):
                 raw_operation = "record_learning_state"
-            elif _first_present_value(payload, ("current_task", "task", "session_goal", "goal", "environment", "course")):
+            elif _first_present_value(payload, ("current_task", "task", "session_goal", "goal", "environment", "course", "task_mode")):
                 raw_operation = "set_learning_context"
         operation = _canonical_operation(CAPABILITY_GUARDIAN, raw_operation)
         payload["operation"] = operation
@@ -599,6 +1448,9 @@ def _normalize_guardian_payload(payload, event_type):
             payload["environment"] = _safe_text(
                 _first_present_value(payload, ("environment", "location", "study_environment")),
                 max_length=180,
+            )
+            payload["task_mode"] = _normalize_guardian_task_mode(
+                _first_present_value(payload, ("task_mode", "study_mode", "mode", "session_mode"))
             )
         elif operation == "record_learning_state":
             payload["current_task"] = _safe_text(
@@ -623,6 +1475,18 @@ def _normalize_guardian_payload(payload, event_type):
                 max_length=1200,
                 preserve_lines=True,
             )
+            payload["environment"] = _safe_text(
+                _first_present_value(payload, ("environment", "location", "study_environment")),
+                max_length=180,
+            )
+            payload["current_course"] = _safe_text(
+                _first_present_value(payload, ("current_course", "course", "module", "subject")),
+                max_length=180,
+            )
+            payload["task_mode"] = _normalize_guardian_task_mode(
+                _first_present_value(payload, ("task_mode", "study_mode", "mode", "session_mode"))
+            )
+            payload.update(_extract_guardian_sensor_fields(payload))
             for field, aliases in {
                 "focus_level": ("focus_level", "focus", "attention_level"),
                 "energy_level": ("energy_level", "energy"),
@@ -642,6 +1506,122 @@ def _normalize_guardian_payload(payload, event_type):
                     derived = _score_to_level(_first_present_value(payload, aliases), invert=invert)
                     if derived is not None:
                         payload[field] = derived
+            focus_score = _optional_score_100(_first_present_value(payload, ("focus_score", "attention_score")))
+            if focus_score is None:
+                focus_score = _level_to_score(payload.get("focus_level"))
+            if focus_score is not None:
+                payload["focus_score"] = focus_score
+
+            stress_score = _optional_score_100(_first_present_value(payload, ("stress_score", "pressure_score")))
+            if stress_score is None:
+                stress_score = _level_to_score(payload.get("stress_level"))
+            if stress_score is not None:
+                payload["stress_score"] = stress_score
+
+            clarity_score = _optional_score_100(
+                _first_present_value(payload, ("clarity_score", "understanding_score", "comprehension_score"))
+            )
+            if clarity_score is None:
+                clarity_score = _level_to_score(payload.get("comprehension_level"))
+            if clarity_score is not None:
+                payload["clarity_score"] = clarity_score
+
+            fatigue_risk = _optional_score_100(_first_present_value(payload, ("fatigue_risk", "fatigue_score")))
+            if fatigue_risk is None:
+                fatigue_risk = _level_to_score(payload.get("energy_level"), invert=True)
+            if fatigue_risk is not None:
+                payload["fatigue_risk"] = fatigue_risk
+
+            behavioral_alignment = _optional_score_100(
+                _first_present_value(payload, ("behavioral_alignment", "behavior_alignment", "alignment_score"))
+            )
+            if behavioral_alignment is None and focus_score is not None:
+                penalty = 0.0
+                if payload.get("distraction"):
+                    penalty += 24.0
+                if payload.get("support_needed"):
+                    penalty += 10.0
+                behavioral_alignment = round(max(0.0, focus_score - penalty), 1)
+            if behavioral_alignment is not None:
+                payload["behavioral_alignment"] = behavioral_alignment
+
+            uncertainty_score = _optional_score_100(_first_present_value(payload, ("uncertainty_score", "uncertainty")))
+            if uncertainty_score is None:
+                confidence_score = _optional_score_100(_first_present_value(payload, ("confidence_score",)))
+                if confidence_score is not None:
+                    uncertainty_score = round(max(0.0, 100.0 - confidence_score), 1)
+                elif clarity_score is not None:
+                    uncertainty_score = round(
+                        max(0.0, min(100.0, 100.0 - clarity_score + (10.0 if payload.get("support_needed") else 0.0))),
+                        1,
+                    )
+            if uncertainty_score is not None:
+                payload["uncertainty_score"] = uncertainty_score
+
+            cognitive_load = _optional_score_100(
+                _first_present_value(payload, ("cognitive_load", "load_score", "workload_score", "mental_load", "mental_load_score"))
+            )
+            if cognitive_load is None:
+                components = []
+                if stress_score is not None:
+                    components.append(stress_score * 0.55)
+                if clarity_score is not None:
+                    components.append((100.0 - clarity_score) * 0.35)
+                if payload.get("distraction"):
+                    components.append(12.0)
+                if payload.get("support_needed"):
+                    components.append(8.0)
+                if components:
+                    cognitive_load = round(max(0.0, min(100.0, sum(components))), 1)
+            if cognitive_load is not None:
+                payload["cognitive_load"] = cognitive_load
+
+            preview_snapshot = _finalize_guardian_snapshot(
+                {
+                    **_extract_guardian_sensor_fields(payload),
+                    "task_mode": payload.get("task_mode"),
+                    "focus_level": payload.get("focus_level"),
+                    "energy_level": payload.get("energy_level"),
+                    "stress_level": payload.get("stress_level"),
+                    "comprehension_level": payload.get("comprehension_level"),
+                    "focus_score": payload.get("focus_score"),
+                    "stress_score": payload.get("stress_score"),
+                    "clarity_score": payload.get("clarity_score"),
+                    "cognitive_load": payload.get("cognitive_load"),
+                    "behavioral_alignment": payload.get("behavioral_alignment"),
+                    "fatigue_risk": payload.get("fatigue_risk"),
+                    "uncertainty_score": payload.get("uncertainty_score"),
+                    "distraction": payload.get("distraction"),
+                    "support_needed": payload.get("support_needed"),
+                    "state_hint": _normalize_guardian_state_hint(
+                        _first_present_value(payload, ("state_hint", "state_label", "state_classification", "hint"))
+                    ),
+                    "load_reason": _safe_text(
+                        _first_present_value(payload, ("load_reason", "review_note")),
+                        max_length=220,
+                    ),
+                }
+            )
+            for field in (
+                "task_mode",
+                "focus_score",
+                "stress_score",
+                "clarity_score",
+                "cognitive_load",
+                "behavioral_alignment",
+                "behavioral_level",
+                "fatigue_risk",
+                "fatigue_level",
+                "uncertainty_score",
+                "confidence_level",
+                "load_level",
+                "switching_index",
+                "drift_trend",
+                "state_hint",
+                "load_reason",
+            ):
+                if preview_snapshot.get(field) not in (None, ""):
+                    payload[field] = preview_snapshot.get(field)
         elif operation == "record_focus_signal":
             payload["signal_type"] = _normalize_guardian_challenge(
                 _first_present_value(payload, ("signal_type", "challenge", "category", "signal", "device_event_type"))
@@ -2195,9 +3175,12 @@ def _default_learning_state_guardian(created_at=""):
         "session_goal": "",
         "current_course": "",
         "environment": "",
+        "task_mode": "",
         "latest_state": {},
         "state_history": [],
         "focus_signals": [],
+        "difficulty_events": [],
+        "difficulty_tracker": _default_guardian_difficulty_tracker(),
         "risk_flags": [],
         "updated_at": timestamp,
     }
@@ -2240,6 +3223,19 @@ def _ensure_mission_extensions(mission):
     guardian_state["focus_signals"] = [item for item in guardian_state.get("focus_signals", []) if isinstance(item, dict)][
         -MAX_HISTORY:
     ]
+    guardian_state["difficulty_events"] = [
+        item for item in guardian_state.get("difficulty_events", []) if isinstance(item, dict)
+    ][-MAX_HISTORY:]
+    tracker = guardian_state.get("difficulty_tracker")
+    if not isinstance(tracker, dict):
+        tracker = _default_guardian_difficulty_tracker()
+    else:
+        defaults = _default_guardian_difficulty_tracker()
+        for key, value in defaults.items():
+            tracker.setdefault(key, copy.deepcopy(value))
+    if not isinstance(tracker.get("active_event"), dict):
+        tracker["active_event"] = {}
+    guardian_state["difficulty_tracker"] = tracker
     guardian_state["risk_flags"] = [
         _safe_text(item, max_length=220)
         for item in guardian_state.get("risk_flags", [])
@@ -2381,14 +3377,52 @@ def _guardian_risk_flags_from_state(latest_state, focus_signals):
     latest_state = latest_state if isinstance(latest_state, dict) else {}
     focus_signals = focus_signals if isinstance(focus_signals, list) else []
     risk_flags = []
-    if _safe_int(latest_state.get("focus_level"), default=0) and _safe_int(latest_state.get("focus_level"), default=0) <= 2:
+    focus_score = _optional_score_100(latest_state.get("focus_score"))
+    fatigue_risk = _optional_score_100(latest_state.get("fatigue_risk"))
+    uncertainty_score = _optional_score_100(latest_state.get("uncertainty_score"))
+    cognitive_load = _optional_score_100(latest_state.get("cognitive_load"))
+    focus_level = _safe_int(latest_state.get("focus_level"), default=0)
+    energy_level = _safe_int(latest_state.get("energy_level"), default=0)
+    stress_level = _safe_int(latest_state.get("stress_level"), default=0)
+    state_hint = _normalize_guardian_state_hint(latest_state.get("state_hint"))
+    task_mode = _normalize_guardian_task_mode(latest_state.get("task_mode")) or "reading"
+    behavioral_level = _safe_text(latest_state.get("behavioral_level"), max_length=40).lower()
+    if not behavioral_level and latest_state.get("behavioral_alignment") not in (None, ""):
+        behavioral_level = _derive_guardian_behavioral_level(latest_state.get("behavioral_alignment"), task_mode=task_mode)
+
+    if focus_score is not None and focus_score <= 40:
         risk_flags.append("Low focus signal")
-    if _safe_int(latest_state.get("energy_level"), default=0) and _safe_int(latest_state.get("energy_level"), default=0) <= 2:
+    elif focus_level and focus_level <= 2:
+        risk_flags.append("Low focus signal")
+
+    if fatigue_risk is not None and fatigue_risk >= 65:
+        risk_flags.append("Fatigue risk rising")
+    elif energy_level and energy_level <= 2:
         risk_flags.append("Low energy signal")
-    if _safe_int(latest_state.get("stress_level"), default=0) >= 4:
+
+    if uncertainty_score is not None and uncertainty_score >= 55:
+        risk_flags.append("Low-confidence signal quality")
+
+    if behavioral_level == "misaligned":
+        risk_flags.append("Behavior drift from current task")
+    elif behavioral_level == "drifting":
+        risk_flags.append("Behavior alignment is slipping")
+
+    if cognitive_load is not None and cognitive_load >= 78:
+        risk_flags.append("High cognitive load")
+
+    if stress_level >= 4:
         risk_flags.append("High stress signal")
     if latest_state.get("distraction"):
         risk_flags.append("Active distraction noted")
+    if latest_state.get("support_needed"):
+        risk_flags.append("Support request still open")
+    if state_hint == "off_task_risk":
+        risk_flags.append("Study state is drifting off target")
+    elif state_hint == "fatigue_risk":
+        risk_flags.append("Fatigue risk is becoming dominant")
+    elif state_hint == "signal_check":
+        risk_flags.append("Signal confidence still warming up")
     recent_unresolved = [
         item
         for item in focus_signals[-4:]
@@ -2403,6 +3437,234 @@ def _guardian_risk_flags_from_state(latest_state, focus_signals):
     return deduped[:5]
 
 
+def _guardian_state_explanation(latest_state, focus_signals, risk_flags):
+    latest_state = latest_state if isinstance(latest_state, dict) else {}
+    focus_signals = focus_signals if isinstance(focus_signals, list) else []
+    risk_flags = risk_flags if isinstance(risk_flags, list) else []
+    task_mode = _normalize_guardian_task_mode(latest_state.get("task_mode")) or "reading"
+    profile = _guardian_task_profile(task_mode)
+    drivers = []
+
+    def add_driver(key, label, value, impact, explanation, score):
+        drivers.append(
+            {
+                "key": key,
+                "label": label,
+                "value": value,
+                "impact": impact,
+                "score": round(max(0.0, min(100.0, _safe_float(score, default=0.0))), 1),
+                "explanation": _safe_text(explanation, max_length=220),
+            }
+        )
+
+    switching_index = _optional_score_100(latest_state.get("switching_index"))
+    if switching_index is not None and switching_index >= max(18.0, profile["switching_high"] * 0.45):
+        impact = "high" if switching_index >= profile["switching_high"] else "medium"
+        add_driver(
+            "switching_index",
+            "Task switching",
+            switching_index,
+            impact,
+            f"Switching index is {switching_index}/100, which suggests attention is hopping across cues during this {task_mode} block.",
+            switching_index,
+        )
+
+    cognitive_load = _optional_score_100(latest_state.get("cognitive_load"))
+    if cognitive_load is not None and cognitive_load >= profile["load_medium"]:
+        impact = "high" if cognitive_load >= profile["load_high"] else "medium"
+        add_driver(
+            "cognitive_load",
+            "Cognitive load",
+            cognitive_load,
+            impact,
+            f"Cognitive load is {cognitive_load}/100, so the current task is demanding more regulation than the {task_mode} baseline expects.",
+            cognitive_load,
+        )
+
+    fatigue_risk = _optional_score_100(latest_state.get("fatigue_risk"))
+    if fatigue_risk is not None and fatigue_risk >= profile["fatigue_medium"]:
+        impact = "high" if fatigue_risk >= profile["fatigue_high"] else "medium"
+        add_driver(
+            "fatigue_risk",
+            "Fatigue pressure",
+            fatigue_risk,
+            impact,
+            f"Fatigue risk is {fatigue_risk}/100, which means energy regulation is starting to shape study performance.",
+            fatigue_risk,
+        )
+
+    uncertainty_score = _optional_score_100(latest_state.get("uncertainty_score"))
+    if uncertainty_score is not None and uncertainty_score >= profile["uncertainty_medium"]:
+        impact = "high" if uncertainty_score >= profile["uncertainty_high"] else "medium"
+        add_driver(
+            "uncertainty_score",
+            "Signal uncertainty",
+            uncertainty_score,
+            impact,
+            f"Uncertainty is {uncertainty_score}/100, so the guardian is seeing a noisier-than-usual study-state signal.",
+            uncertainty_score,
+        )
+
+    behavioral_alignment = _optional_score_100(latest_state.get("behavioral_alignment"))
+    if behavioral_alignment is not None and behavioral_alignment <= profile["behavioral_drifting"]:
+        impact = "high" if behavioral_alignment <= profile["behavioral_misaligned"] else "medium"
+        add_driver(
+            "behavioral_alignment",
+            "Behavior alignment",
+            behavioral_alignment,
+            impact,
+            f"Behavior alignment is only {behavioral_alignment}/100, which means the observed study pattern is drifting from the expected {task_mode} mode.",
+            100.0 - behavioral_alignment,
+        )
+
+    scene_switch_rate = _optional_score_100(latest_state.get("scene_switch_rate"))
+    if scene_switch_rate is not None and scene_switch_rate >= max(20.0, profile["switching_high"] * 0.5):
+        impact = "high" if scene_switch_rate >= profile["switching_high"] else "medium"
+        add_driver(
+            "scene_switch_rate",
+            "Scene switching",
+            scene_switch_rate,
+            impact,
+            f"Scene switch rate is {scene_switch_rate}/100, which points to frequent context changes around the learner.",
+            scene_switch_rate,
+        )
+
+    scene_lock_score = _optional_score_100(latest_state.get("scene_lock_score"))
+    if scene_lock_score is not None and scene_lock_score <= 40:
+        impact = "high" if scene_lock_score <= 28 else "medium"
+        add_driver(
+            "scene_lock_score",
+            "Scene lock",
+            scene_lock_score,
+            impact,
+            f"Scene lock is {scene_lock_score}/100, so the environment is not strongly anchoring the current task.",
+            100.0 - scene_lock_score,
+        )
+
+    orientation_drift = _optional_score_100(latest_state.get("orientation_drift"))
+    if orientation_drift is not None and orientation_drift >= 42:
+        impact = "high" if orientation_drift >= 65 else "medium"
+        add_driver(
+            "orientation_drift",
+            "Orientation drift",
+            orientation_drift,
+            impact,
+            f"Orientation drift is {orientation_drift}/100, which suggests head or gaze alignment is pulling away from the intended study surface.",
+            orientation_drift,
+        )
+
+    movement_intensity = _optional_score_100(latest_state.get("movement_intensity"))
+    if movement_intensity is not None and movement_intensity >= 36:
+        impact = "high" if movement_intensity >= 58 else "medium"
+        add_driver(
+            "movement_intensity",
+            "Movement intensity",
+            movement_intensity,
+            impact,
+            f"Movement intensity is {movement_intensity}/100, so physical motion is likely adding friction to this {task_mode} block.",
+            movement_intensity,
+        )
+
+    blur_score = _optional_score_100(latest_state.get("blur_score"))
+    if blur_score is not None and blur_score < 18:
+        impact = "high" if blur_score < 10 else "medium"
+        add_driver(
+            "blur_score",
+            "Scene clarity",
+            blur_score,
+            impact,
+            f"Blur score is {blur_score}/100, which can make the signal noisier and weaken confidence in the current reading surface.",
+            100.0 - blur_score,
+        )
+
+    brightness_score = _optional_score_100(latest_state.get("brightness_score"))
+    if brightness_score is not None and (brightness_score < 14 or brightness_score > 88):
+        impact = "high" if brightness_score < 8 or brightness_score > 94 else "medium"
+        brightness_note = "too dim" if brightness_score < 14 else "too bright"
+        add_driver(
+            "brightness_score",
+            "Brightness",
+            brightness_score,
+            impact,
+            f"Brightness is {brightness_score}/100 and looks {brightness_note} for a stable {task_mode} signal.",
+            abs(brightness_score - 50.0),
+        )
+
+    if latest_state.get("distraction"):
+        add_driver(
+            "distraction",
+            "Reported distraction",
+            latest_state.get("distraction"),
+            "medium",
+            f"Reported distraction: {latest_state.get('distraction')}. This is directly competing with the current study goal.",
+            62.0,
+        )
+    if latest_state.get("support_needed"):
+        add_driver(
+            "support_needed",
+            "Open support need",
+            latest_state.get("support_needed"),
+            "medium",
+            "There is still an open support request, which usually raises load and slows recovery.",
+            56.0,
+        )
+
+    unresolved_count = len(
+        [item for item in focus_signals[-4:] if isinstance(item, dict) and not _safe_bool(item.get("resolved"), default=False)]
+    )
+    if unresolved_count:
+        add_driver(
+            "unresolved_signals",
+            "Unresolved blockers",
+            unresolved_count,
+            "medium" if unresolved_count < 3 else "high",
+            f"There are {unresolved_count} unresolved recent blocker signals, so the state has not fully settled yet.",
+            min(100.0, 30.0 + (unresolved_count * 16.0)),
+        )
+
+    drivers.sort(key=lambda item: (0 if item["impact"] == "high" else 1, -item["score"]))
+    primary_driver = drivers[0] if drivers else {}
+    secondary_drivers = drivers[1:4]
+    state_hint = _normalize_guardian_state_hint(latest_state.get("state_hint")) or "stable"
+    state_hint_label = _guardian_state_hint_label(state_hint)
+
+    why_this_state = f"The guardian marked this state as {state_hint_label.lower()}."
+    if primary_driver:
+        why_this_state = (
+            f"The guardian marked this state as {state_hint_label.lower()} mainly because "
+            f"{primary_driver.get('label', 'the top signal').lower()} is driving the pattern."
+        )
+
+    top_intervention = "Capture one more clean snapshot after the next focused block."
+    if primary_driver:
+        intervention_map = {
+            "Task switching": "Reduce context switching first by keeping one surface open and hiding extra tabs or notifications.",
+            "Cognitive load": "Reduce load first by shrinking the next checkpoint and removing any optional subtask.",
+            "Fatigue pressure": "Shorten the next work block and take a recovery reset before pushing further.",
+            "Signal uncertainty": "Collect one cleaner snapshot before changing the study plan so the signal can settle.",
+            "Behavior alignment": "Realign the study behavior to the current task mode before trying to increase speed.",
+            "Scene switching": "Stabilize the study environment and remove visual context changes before continuing.",
+            "Scene lock": "Re-anchor the study surface so the learner has one clear visual target.",
+            "Orientation drift": "Bring gaze and head alignment back to the study surface for one short block.",
+            "Movement intensity": "Reduce physical movement and return to one stable work posture for the next checkpoint.",
+            "Scene clarity": "Improve the visibility of the study surface before trusting the next state snapshot.",
+            "Brightness": "Adjust lighting first so the signal is easier to read.",
+            "Reported distraction": "Remove the named distraction before resuming the task.",
+            "Open support need": "Resolve the open support need before pushing into a harder segment.",
+            "Unresolved blockers": "Clear the unresolved blockers one by one so the state can settle.",
+        }
+        top_intervention = intervention_map.get(primary_driver.get("label"), top_intervention)
+
+    return {
+        "why_this_state": why_this_state,
+        "primary_driver": primary_driver,
+        "secondary_drivers": secondary_drivers,
+        "drivers": drivers[:6],
+        "top_intervention": top_intervention,
+        "risk_flags": risk_flags[:5],
+    }
+
+
 def _build_learning_state_review(mission):
     state = _ensure_payload_dict(mission.get("learning_state_guardian"))
     history = [item for item in state.get("state_history", []) if isinstance(item, dict)]
@@ -2410,6 +3672,12 @@ def _build_learning_state_review(mission):
     latest_state = state.get("latest_state", {}) if isinstance(state.get("latest_state"), dict) else {}
     if not latest_state and history:
         latest_state = history[-1]
+    if latest_state:
+        latest_state = _finalize_guardian_snapshot(
+            latest_state,
+            recent_history=history[:-1] if history else [],
+            focus_signals=signals,
+        )
 
     recent_history = history[-4:]
     averages = {
@@ -2422,10 +3690,63 @@ def _build_learning_state_review(mission):
         "stress_level": round(sum(_safe_int(item.get("stress_level"), default=0) for item in recent_history) / len(recent_history), 1)
         if recent_history
         else 0.0,
+        "focus_score": _guardian_numeric_average(recent_history, "focus_score"),
+        "cognitive_load": _guardian_numeric_average(recent_history, "cognitive_load"),
+        "behavioral_alignment": _guardian_numeric_average(recent_history, "behavioral_alignment"),
+        "fatigue_risk": _guardian_numeric_average(recent_history, "fatigue_risk"),
+        "uncertainty_score": _guardian_numeric_average(recent_history, "uncertainty_score"),
     }
     risk_flags = state.get("risk_flags", []) or _guardian_risk_flags_from_state(latest_state, signals)
-    coach_message = "Record one state snapshot with focus, energy, and stress so the guardian can spot trends."
-    if risk_flags:
+    active_difficulty_event = _guardian_difficulty_public_event(
+        _ensure_payload_dict(_ensure_payload_dict(state.get("difficulty_tracker")).get("active_event")),
+        status="active",
+    )
+    recent_difficulty_events = [
+        _guardian_difficulty_public_event(item, status="resolved")
+        for item in [entry for entry in state.get("difficulty_events", []) if isinstance(entry, dict)][-4:]
+    ]
+    state_explanation = _guardian_state_explanation(latest_state, signals, risk_flags)
+    recent_hints = [
+        _normalize_guardian_state_hint(item.get("state_hint"))
+        for item in recent_history
+        if _normalize_guardian_state_hint(item.get("state_hint"))
+    ]
+    hint_counter = Counter(recent_hints)
+    dominant_state_hint = hint_counter.most_common(1)[0][0] if hint_counter else _normalize_guardian_state_hint(
+        latest_state.get("state_hint")
+    )
+    trend_signals = {
+        "focus_score": _guardian_metric_trend(recent_history, "focus_score", higher_is_better=True, threshold=8.0),
+        "cognitive_load": _guardian_metric_trend(recent_history, "cognitive_load", higher_is_better=False, threshold=8.0),
+        "behavioral_alignment": _guardian_metric_trend(
+            recent_history,
+            "behavioral_alignment",
+            higher_is_better=True,
+            threshold=8.0,
+        ),
+        "fatigue_risk": _guardian_metric_trend(recent_history, "fatigue_risk", higher_is_better=False, threshold=8.0),
+        "uncertainty_score": _guardian_metric_trend(
+            recent_history,
+            "uncertainty_score",
+            higher_is_better=False,
+            threshold=8.0,
+        ),
+    }
+    coach_message = "Record one state snapshot with focus, load, and fatigue so the guardian can spot trends."
+    if dominant_state_hint == "fatigue_risk":
+        coach_message = "Fatigue risk is rising. Shorten the next block, reduce scope, and return only after a clear reset."
+    elif dominant_state_hint == "off_task_risk":
+        coach_message = "Your study behavior is drifting from the task. Remove one distraction and restate the next checkpoint before continuing."
+    elif active_difficulty_event:
+        coach_message = (
+            f"A sustained guardian event is active: {active_difficulty_event.get('primary_label') or 'study-state difficulty'}. "
+            "Treat this as a live intervention point before pushing deeper into the task."
+        )
+    elif dominant_state_hint == "signal_check":
+        coach_message = "The signal is still warming up. Capture one more clean snapshot before making a bigger study decision."
+    elif dominant_state_hint == "productive_struggle":
+        coach_message = "This looks like productive struggle. Stay with the current task, but keep the finish line narrow."
+    elif risk_flags:
         coach_message = f"The main study-state risk is {risk_flags[0]}. Reduce one friction point before the next work block."
     elif latest_state.get("current_task") or state.get("current_task"):
         coach_message = (
@@ -2438,11 +3759,40 @@ def _build_learning_state_review(mission):
         "session_goal": state.get("session_goal", ""),
         "current_course": state.get("current_course", ""),
         "environment": state.get("environment", ""),
+        "task_mode": state.get("task_mode", "") or latest_state.get("task_mode", ""),
         "latest_state": latest_state,
+        "core_metrics": {
+            "focus_score": latest_state.get("focus_score"),
+            "cognitive_load": latest_state.get("cognitive_load"),
+            "behavioral_alignment": latest_state.get("behavioral_alignment"),
+            "fatigue_risk": latest_state.get("fatigue_risk"),
+            "uncertainty_score": latest_state.get("uncertainty_score"),
+            "switching_index": latest_state.get("switching_index"),
+            "drift_trend": latest_state.get("drift_trend"),
+            "stability": latest_state.get("stability"),
+        },
+        "state_classification": {
+            "state_hint": latest_state.get("state_hint", ""),
+            "state_hint_label": _guardian_state_hint_label(latest_state.get("state_hint")),
+            "load_level": latest_state.get("load_level", ""),
+            "fatigue_level": latest_state.get("fatigue_level", ""),
+            "behavioral_level": latest_state.get("behavioral_level", ""),
+            "confidence_level": latest_state.get("confidence_level", ""),
+            "load_reason": latest_state.get("load_reason", ""),
+        },
+        "sensor_snapshot": _guardian_sensor_snapshot_payload(latest_state),
         "state_history_count": len(history),
         "recent_focus_signals": signals[-4:],
         "risk_flags": risk_flags,
+        "state_explanation": state_explanation,
+        "difficulty_tracking": {
+            "active_event": active_difficulty_event,
+            "recent_events": recent_difficulty_events,
+            "event_count": len([item for item in state.get("difficulty_events", []) if isinstance(item, dict)]),
+        },
         "trend_averages": averages,
+        "trend_signals": trend_signals,
+        "dominant_state_hint": dominant_state_hint,
         "coach_message": coach_message,
         "updated_at": state.get("updated_at", ""),
     }
@@ -3004,6 +4354,7 @@ def _apply_learning_state_update(mission, payload, operation):
             "",
         )
         state["environment"] = _safe_text(payload.get("environment"), max_length=180) or state.get("environment", "")
+        state["task_mode"] = _normalize_guardian_task_mode(payload.get("task_mode")) or state.get("task_mode", "")
         state["updated_at"] = recorded_at
         mission["learning_state_guardian"] = state
         return {
@@ -3012,31 +4363,118 @@ def _apply_learning_state_update(mission, payload, operation):
             "session_goal": state.get("session_goal", ""),
             "current_course": state.get("current_course", ""),
             "environment": state.get("environment", ""),
+            "task_mode": state.get("task_mode", ""),
         }
 
     if operation == "record_learning_state":
+        focus_level = max(0, min(5, _safe_int(payload.get("focus_level"), default=0)))
+        energy_level = max(0, min(5, _safe_int(payload.get("energy_level"), default=0)))
+        stress_level = max(0, min(5, _safe_int(payload.get("stress_level"), default=0)))
+        comprehension_level = max(0, min(5, _safe_int(payload.get("comprehension_level"), default=0)))
+        focus_score = _optional_score_100(payload.get("focus_score"))
+        if focus_score is None:
+            focus_score = _level_to_score(focus_level)
+        stress_score = _optional_score_100(payload.get("stress_score"))
+        if stress_score is None:
+            stress_score = _level_to_score(stress_level)
+        clarity_score = _optional_score_100(payload.get("clarity_score"))
+        if clarity_score is None:
+            clarity_score = _level_to_score(comprehension_level)
+        fatigue_risk = _optional_score_100(payload.get("fatigue_risk"))
+        if fatigue_risk is None:
+            fatigue_risk = _level_to_score(energy_level, invert=True)
+        behavioral_alignment = _optional_score_100(payload.get("behavioral_alignment"))
+        if behavioral_alignment is None and focus_score is not None:
+            penalty = 0.0
+            if payload.get("distraction"):
+                penalty += 24.0
+            if payload.get("support_needed"):
+                penalty += 10.0
+            behavioral_alignment = round(max(0.0, focus_score - penalty), 1)
+        uncertainty_score = _optional_score_100(payload.get("uncertainty_score"))
+        if uncertainty_score is None:
+            confidence_score = _optional_score_100(payload.get("confidence_score"))
+            if confidence_score is not None:
+                uncertainty_score = round(max(0.0, 100.0 - confidence_score), 1)
+            elif clarity_score is not None:
+                uncertainty_score = round(
+                    max(0.0, min(100.0, 100.0 - clarity_score + (10.0 if payload.get("support_needed") else 0.0))),
+                    1,
+                )
+        cognitive_load = _optional_score_100(payload.get("cognitive_load"))
+        if cognitive_load is None:
+            components = []
+            if stress_score is not None:
+                components.append(stress_score * 0.55)
+            if clarity_score is not None:
+                components.append((100.0 - clarity_score) * 0.35)
+            if payload.get("distraction"):
+                components.append(12.0)
+            if payload.get("support_needed"):
+                components.append(8.0)
+            if components:
+                cognitive_load = round(max(0.0, min(100.0, sum(components))), 1)
         snapshot = {
             "snapshot_id": _safe_text(payload.get("snapshot_id"), max_length=80) or _build_id("state"),
             "recorded_at": recorded_at,
             "current_task": _safe_text(payload.get("current_task") or payload.get("task"), max_length=220)
             or state.get("current_task", ""),
-            "focus_level": max(0, min(5, _safe_int(payload.get("focus_level"), default=0))),
-            "energy_level": max(0, min(5, _safe_int(payload.get("energy_level"), default=0))),
-            "stress_level": max(0, min(5, _safe_int(payload.get("stress_level"), default=0))),
-            "comprehension_level": max(0, min(5, _safe_int(payload.get("comprehension_level"), default=0))),
+            "current_course": _safe_text(payload.get("current_course"), max_length=180) or state.get("current_course", ""),
+            "task_mode": _normalize_guardian_task_mode(payload.get("task_mode")) or state.get("task_mode", ""),
+            "focus_level": focus_level,
+            "energy_level": energy_level,
+            "stress_level": stress_level,
+            "comprehension_level": comprehension_level,
             "progress_status": _safe_text(payload.get("progress_status"), max_length=180),
             "environment": _safe_text(payload.get("environment"), max_length=180) or state.get("environment", ""),
             "distraction": _safe_text(payload.get("distraction"), max_length=240),
             "support_needed": _safe_text(payload.get("support_needed"), max_length=320, preserve_lines=True),
             "note": _safe_text(payload.get("note"), max_length=1200, preserve_lines=True),
         }
+        snapshot.update(_extract_guardian_sensor_fields(payload))
+        if focus_score is not None:
+            snapshot["focus_score"] = focus_score
+        if stress_score is not None:
+            snapshot["stress_score"] = stress_score
+        if clarity_score is not None:
+            snapshot["clarity_score"] = clarity_score
+        if fatigue_risk is not None:
+            snapshot["fatigue_risk"] = fatigue_risk
+            snapshot["fatigue_level"] = _safe_text(payload.get("fatigue_level"), max_length=40).lower() or _derive_guardian_fatigue_level(
+                fatigue_risk
+            )
+        if behavioral_alignment is not None:
+            snapshot["behavioral_alignment"] = behavioral_alignment
+            snapshot["behavioral_level"] = _safe_text(payload.get("behavioral_level"), max_length=40).lower() or _derive_guardian_behavioral_level(
+                behavioral_alignment
+            )
+        if uncertainty_score is not None:
+            snapshot["uncertainty_score"] = uncertainty_score
+            snapshot["confidence_level"] = _safe_text(payload.get("confidence_level"), max_length=40).lower() or _derive_guardian_confidence_level(
+                uncertainty_score
+            )
+        if cognitive_load is not None:
+            snapshot["cognitive_load"] = cognitive_load
+            snapshot["load_level"] = _safe_text(payload.get("load_level"), max_length=40).lower() or _derive_guardian_load_level(
+                cognitive_load
+            )
+        snapshot["state_hint"] = _normalize_guardian_state_hint(payload.get("state_hint")) or snapshot.get("state_hint")
+        snapshot["load_reason"] = _safe_text(payload.get("load_reason"), max_length=220) or snapshot.get("load_reason")
+        snapshot = _finalize_guardian_snapshot(
+            snapshot,
+            recent_history=state.get("state_history", []),
+            focus_signals=state.get("focus_signals", []),
+        )
         history = state.get("state_history", [])
         _append_limited(history, snapshot)
         state["state_history"] = history
         state["latest_state"] = snapshot
         state["current_task"] = snapshot.get("current_task", "") or state.get("current_task", "")
+        state["current_course"] = snapshot.get("current_course", "") or state.get("current_course", "")
         state["environment"] = snapshot.get("environment", "") or state.get("environment", "")
+        state["task_mode"] = snapshot.get("task_mode", "") or state.get("task_mode", "")
         state["risk_flags"] = _guardian_risk_flags_from_state(snapshot, state.get("focus_signals", []))
+        difficulty_event = _update_guardian_difficulty_tracking(state, snapshot=snapshot, recorded_at=recorded_at)
         state["updated_at"] = recorded_at
         mission["learning_state_guardian"] = state
         return {
@@ -3044,6 +4482,7 @@ def _apply_learning_state_update(mission, payload, operation):
             "snapshot": snapshot,
             "risk_flags": state.get("risk_flags", []),
             "state_history_count": len(history),
+            "difficulty_event": difficulty_event or {},
         }
 
     if operation == "record_focus_signal":
@@ -3059,6 +4498,12 @@ def _apply_learning_state_update(mission, payload, operation):
         _append_limited(signals, signal)
         state["focus_signals"] = signals
         state["risk_flags"] = _guardian_risk_flags_from_state(state.get("latest_state", {}), signals)
+        difficulty_event = _update_guardian_difficulty_tracking(
+            state,
+            snapshot=state.get("latest_state", {}),
+            signal=signal,
+            recorded_at=recorded_at,
+        )
         state["updated_at"] = recorded_at
         mission["learning_state_guardian"] = state
         return {
@@ -3066,6 +4511,7 @@ def _apply_learning_state_update(mission, payload, operation):
             "signal": signal,
             "risk_flags": state.get("risk_flags", []),
             "focus_signal_count": len(signals),
+            "difficulty_event": difficulty_event or {},
         }
 
     raise ValueError(f"Unsupported learning-state operation: {operation}")
@@ -3097,6 +4543,12 @@ def _apply_guardian_difficulty(mission, difficulty_entry):
     _append_limited(signals, signal)
     state["focus_signals"] = signals
     state["risk_flags"] = _guardian_risk_flags_from_state(state.get("latest_state", {}), signals)
+    _update_guardian_difficulty_tracking(
+        state,
+        snapshot=state.get("latest_state", {}),
+        signal=signal,
+        recorded_at=difficulty_entry.get("recorded_at", ""),
+    )
     state["updated_at"] = difficulty_entry.get("recorded_at", "")
     mission["learning_state_guardian"] = state
 
@@ -3134,18 +4586,37 @@ def _build_reflection_chat_reply(message, mission):
 def _build_learning_state_chat_reply(message, mission):
     review = _build_learning_state_review(mission)
     latest = review.get("latest_state", {}) or {}
+    active_difficulty_event = _ensure_payload_dict(review.get("difficulty_tracking", {})).get("active_event") or {}
+    state_explanation = _ensure_payload_dict(review.get("state_explanation"))
     lowered = (message or "").lower()
     if not message:
-        return "Learning-state guardian is online. Tell me your current task, focus, energy, and stress so I can spot the biggest risk."
+        return (
+            "Learning-state guardian is online. Tell me your current task, focus, fatigue, and load so I can spot the biggest risk."
+        )
+    if "why" in lowered or "reason" in lowered or "explain" in lowered:
+        primary_driver = _ensure_payload_dict(state_explanation.get("primary_driver"))
+        if primary_driver:
+            return (
+                f"{state_explanation.get('why_this_state', 'The guardian has a state explanation ready.')} "
+                f"The top driver is {primary_driver.get('label', 'the current signal').lower()}: "
+                f"{primary_driver.get('explanation', 'it is contributing the most to the current state.')}"
+            )
+        return "The current state looks relatively stable, so there is no dominant explanation driver yet."
     if "focus" in lowered or "distracted" in lowered:
+        if active_difficulty_event:
+            return (
+                f"There is an active study-state event: {active_difficulty_event.get('primary_label')}. "
+                "Pause and resolve that friction before starting a deeper block."
+            )
         risks = review.get("risk_flags", [])
         if risks:
             return f"The strongest focus signal is: {risks[0]}. Remove one distraction before you keep studying."
         return "Your focus state looks stable enough for another work block. Keep the task narrow and log the next snapshot."
-    if "energy" in lowered or "tired" in lowered:
-        level = latest.get("energy_level", 0)
+    if "energy" in lowered or "tired" in lowered or "fatigue" in lowered:
+        fatigue_risk = latest.get("fatigue_risk")
+        fatigue_level = latest.get("fatigue_level") or "unknown"
         return (
-            f"Your latest energy level is {level}/5. "
+            f"Your latest fatigue signal is {fatigue_risk if fatigue_risk is not None else 'n/a'}/100 ({fatigue_level}). "
             "If that feels accurate, shorten the next work block and define one finish line before you continue."
         )
     if "stress" in lowered or "overwhelmed" in lowered:
@@ -3154,9 +4625,36 @@ def _build_learning_state_chat_reply(message, mission):
             f"Your latest stress level is {level}/5. "
             "Reduce the scope to one checkpoint and remove any optional task until that checkpoint is done."
         )
+    if "load" in lowered or "workload" in lowered:
+        cognitive_load = latest.get("cognitive_load")
+        load_level = latest.get("load_level") or "unknown"
+        load_reason = latest.get("load_reason") or review.get("state_classification", {}).get("load_reason", "")
+        return (
+            f"Current cognitive load is {cognitive_load if cognitive_load is not None else 'n/a'}/100 ({load_level}). "
+            f"{load_reason or 'Keep the next study block narrow and re-check after one checkpoint.'}"
+        )
+    if "confidence" in lowered or "uncertain" in lowered or "signal" in lowered:
+        uncertainty_score = latest.get("uncertainty_score")
+        confidence_level = latest.get("confidence_level") or "unknown"
+        return (
+            f"Signal confidence is {confidence_level} with uncertainty at {uncertainty_score if uncertainty_score is not None else 'n/a'}/100. "
+            "Use one more clean snapshot before you make a bigger study decision if the signal still feels noisy."
+        )
+    if "mode" in lowered or "task type" in lowered:
+        task_mode = review.get("task_mode") or "general study"
+        return f"The guardian currently reads this block as {task_mode}. Keep your study behavior matched to that mode for cleaner signals."
     if "task" in lowered or "progress" in lowered or "state" in lowered:
         task = latest.get("current_task") or review.get("current_task") or "your current study task"
-        return f"Stay with {task}. {review.get('coach_message', 'Log one more state snapshot after the next focused block.')}"
+        state_hint = review.get("state_classification", {}).get("state_hint_label") or "current learning state"
+        if active_difficulty_event:
+            return (
+                f"Stay with {task}, but note that a sustained event is active: {active_difficulty_event.get('primary_label')}. "
+                f"{review.get('coach_message', 'Log one more state snapshot after the next focused block.')}"
+            )
+        return (
+            f"Stay with {task}. The guardian reads the state as {state_hint.lower()}. "
+            f"{review.get('coach_message', 'Log one more state snapshot after the next focused block.')}"
+        )
     return review.get("coach_message", "Record one learning-state snapshot so the guardian can identify the next intervention.")
 
 
