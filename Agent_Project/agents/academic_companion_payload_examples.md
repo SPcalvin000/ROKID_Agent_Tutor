@@ -144,6 +144,38 @@ This auto-normalizes to:
 - capability: `reflection_coach`
 - operation: `plan_next_step`
 
+## 5A. Reflection Focus And Metadata
+
+Use this when you want the reflection coach to remember the current theme,
+the learner's own note, the next-session goal, and the preferred provider mode.
+
+```json
+{
+  "agent_type": "academic_companion",
+  "event_type": "state_update",
+  "session_id": "reflection_demo",
+  "timestamp": 1710000000000,
+  "payload": {
+    "capability": "reflection_coach",
+    "operation": "set_reflection_focus",
+    "focus_theme": "switching during review",
+    "target_habit": "stay on one source for two minutes",
+    "current_course": "Biology",
+    "learner_note": "I panic-switch when load rises.",
+    "next_goal": "Finish one page before opening another source.",
+    "provider_override": "heuristic"
+  }
+}
+```
+
+This keeps the reflection review anchored around:
+
+- `focus_theme`
+- `target_habit`
+- `learner_note`
+- `next_goal`
+- `provider_override`
+
 ## 6. Learning State Snapshot
 
 Score-style payload from device or frontend:
@@ -325,6 +357,20 @@ Reflection review:
 }
 ```
 
+Reflection review is the main place to inspect:
+
+- `signature`
+- `coach_summary`
+- `coach_cards`
+- `reflection_questions`
+- `next_session_experiments`
+- `evidence_cards`
+- `coach_memo`
+- `learner_note`
+- `next_goal`
+- `provider_status`
+- `generation`
+
 Learning-state review:
 
 ```json
@@ -346,6 +392,47 @@ Guardian review is the main place to inspect:
 - `state_classification`
 - `state_explanation`
 - `difficulty_tracking`
+
+## 10A. Reflection Review Fields
+
+Example reflection review fields to expect:
+
+```json
+{
+  "focus_theme": "switching during review",
+  "target_habit": "stay on one source for two minutes",
+  "learner_note": "I panic-switch when load rises.",
+  "next_goal": "Finish one page before opening another source.",
+  "signature": {
+    "key": "switching_drift",
+    "label": "Switching Drift"
+  },
+  "coach_summary": {
+    "headline": "Target switching likely disrupted the learning rhythm."
+  },
+  "reflection_questions": [
+    {
+      "question": "What triggered the first unnecessary switch before or during the latest study block?"
+    }
+  ],
+  "next_session_experiments": [
+    {
+      "title": "Two-minute source lock"
+    }
+  ],
+  "provider_status": {
+    "requested_provider": "heuristic",
+    "effective_provider": "heuristic",
+    "configured_model": "qwen3:4b",
+    "selected_model": "",
+    "llm_available": true
+  },
+  "generation": {
+    "mode": "heuristic",
+    "used_llm": false
+  }
+}
+```
 
 ## 11. Text Chat
 
@@ -374,6 +461,66 @@ Reflection coaching:
   "payload": {
     "capability": "reflection_coach",
     "message": "What is my next step from this reflection?"
+  }
+}
+```
+
+Reflection question prompt:
+
+```json
+{
+  "agent_type": "academic_companion",
+  "event_type": "text_chat",
+  "session_id": "reflection_demo",
+  "timestamp": 1710000000000,
+  "payload": {
+    "capability": "reflection_coach",
+    "message": "Give me one reflection question."
+  }
+}
+```
+
+Reflection experiment prompt:
+
+```json
+{
+  "agent_type": "academic_companion",
+  "event_type": "text_chat",
+  "session_id": "reflection_demo",
+  "timestamp": 1710000000000,
+  "payload": {
+    "capability": "reflection_coach",
+    "message": "Give me one experiment for next session."
+  }
+}
+```
+
+Reflection memo prompt:
+
+```json
+{
+  "agent_type": "academic_companion",
+  "event_type": "text_chat",
+  "session_id": "reflection_demo",
+  "timestamp": 1710000000000,
+  "payload": {
+    "capability": "reflection_coach",
+    "message": "Show me the memo."
+  }
+}
+```
+
+Reflection provider-status prompt:
+
+```json
+{
+  "agent_type": "academic_companion",
+  "event_type": "text_chat",
+  "session_id": "reflection_demo",
+  "timestamp": 1710000000000,
+  "payload": {
+    "capability": "reflection_coach",
+    "message": "Show provider status."
   }
 }
 ```
