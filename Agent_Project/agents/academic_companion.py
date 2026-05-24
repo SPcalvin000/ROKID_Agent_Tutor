@@ -3437,6 +3437,234 @@ def _guardian_risk_flags_from_state(latest_state, focus_signals):
     return deduped[:5]
 
 
+def _guardian_state_explanation(latest_state, focus_signals, risk_flags):
+    latest_state = latest_state if isinstance(latest_state, dict) else {}
+    focus_signals = focus_signals if isinstance(focus_signals, list) else []
+    risk_flags = risk_flags if isinstance(risk_flags, list) else []
+    task_mode = _normalize_guardian_task_mode(latest_state.get("task_mode")) or "reading"
+    profile = _guardian_task_profile(task_mode)
+    drivers = []
+
+    def add_driver(key, label, value, impact, explanation, score):
+        drivers.append(
+            {
+                "key": key,
+                "label": label,
+                "value": value,
+                "impact": impact,
+                "score": round(max(0.0, min(100.0, _safe_float(score, default=0.0))), 1),
+                "explanation": _safe_text(explanation, max_length=220),
+            }
+        )
+
+    switching_index = _optional_score_100(latest_state.get("switching_index"))
+    if switching_index is not None and switching_index >= max(18.0, profile["switching_high"] * 0.45):
+        impact = "high" if switching_index >= profile["switching_high"] else "medium"
+        add_driver(
+            "switching_index",
+            "Task switching",
+            switching_index,
+            impact,
+            f"Switching index is {switching_index}/100, which suggests attention is hopping across cues during this {task_mode} block.",
+            switching_index,
+        )
+
+    cognitive_load = _optional_score_100(latest_state.get("cognitive_load"))
+    if cognitive_load is not None and cognitive_load >= profile["load_medium"]:
+        impact = "high" if cognitive_load >= profile["load_high"] else "medium"
+        add_driver(
+            "cognitive_load",
+            "Cognitive load",
+            cognitive_load,
+            impact,
+            f"Cognitive load is {cognitive_load}/100, so the current task is demanding more regulation than the {task_mode} baseline expects.",
+            cognitive_load,
+        )
+
+    fatigue_risk = _optional_score_100(latest_state.get("fatigue_risk"))
+    if fatigue_risk is not None and fatigue_risk >= profile["fatigue_medium"]:
+        impact = "high" if fatigue_risk >= profile["fatigue_high"] else "medium"
+        add_driver(
+            "fatigue_risk",
+            "Fatigue pressure",
+            fatigue_risk,
+            impact,
+            f"Fatigue risk is {fatigue_risk}/100, which means energy regulation is starting to shape study performance.",
+            fatigue_risk,
+        )
+
+    uncertainty_score = _optional_score_100(latest_state.get("uncertainty_score"))
+    if uncertainty_score is not None and uncertainty_score >= profile["uncertainty_medium"]:
+        impact = "high" if uncertainty_score >= profile["uncertainty_high"] else "medium"
+        add_driver(
+            "uncertainty_score",
+            "Signal uncertainty",
+            uncertainty_score,
+            impact,
+            f"Uncertainty is {uncertainty_score}/100, so the guardian is seeing a noisier-than-usual study-state signal.",
+            uncertainty_score,
+        )
+
+    behavioral_alignment = _optional_score_100(latest_state.get("behavioral_alignment"))
+    if behavioral_alignment is not None and behavioral_alignment <= profile["behavioral_drifting"]:
+        impact = "high" if behavioral_alignment <= profile["behavioral_misaligned"] else "medium"
+        add_driver(
+            "behavioral_alignment",
+            "Behavior alignment",
+            behavioral_alignment,
+            impact,
+            f"Behavior alignment is only {behavioral_alignment}/100, which means the observed study pattern is drifting from the expected {task_mode} mode.",
+            100.0 - behavioral_alignment,
+        )
+
+    scene_switch_rate = _optional_score_100(latest_state.get("scene_switch_rate"))
+    if scene_switch_rate is not None and scene_switch_rate >= max(20.0, profile["switching_high"] * 0.5):
+        impact = "high" if scene_switch_rate >= profile["switching_high"] else "medium"
+        add_driver(
+            "scene_switch_rate",
+            "Scene switching",
+            scene_switch_rate,
+            impact,
+            f"Scene switch rate is {scene_switch_rate}/100, which points to frequent context changes around the learner.",
+            scene_switch_rate,
+        )
+
+    scene_lock_score = _optional_score_100(latest_state.get("scene_lock_score"))
+    if scene_lock_score is not None and scene_lock_score <= 40:
+        impact = "high" if scene_lock_score <= 28 else "medium"
+        add_driver(
+            "scene_lock_score",
+            "Scene lock",
+            scene_lock_score,
+            impact,
+            f"Scene lock is {scene_lock_score}/100, so the environment is not strongly anchoring the current task.",
+            100.0 - scene_lock_score,
+        )
+
+    orientation_drift = _optional_score_100(latest_state.get("orientation_drift"))
+    if orientation_drift is not None and orientation_drift >= 42:
+        impact = "high" if orientation_drift >= 65 else "medium"
+        add_driver(
+            "orientation_drift",
+            "Orientation drift",
+            orientation_drift,
+            impact,
+            f"Orientation drift is {orientation_drift}/100, which suggests head or gaze alignment is pulling away from the intended study surface.",
+            orientation_drift,
+        )
+
+    movement_intensity = _optional_score_100(latest_state.get("movement_intensity"))
+    if movement_intensity is not None and movement_intensity >= 36:
+        impact = "high" if movement_intensity >= 58 else "medium"
+        add_driver(
+            "movement_intensity",
+            "Movement intensity",
+            movement_intensity,
+            impact,
+            f"Movement intensity is {movement_intensity}/100, so physical motion is likely adding friction to this {task_mode} block.",
+            movement_intensity,
+        )
+
+    blur_score = _optional_score_100(latest_state.get("blur_score"))
+    if blur_score is not None and blur_score < 18:
+        impact = "high" if blur_score < 10 else "medium"
+        add_driver(
+            "blur_score",
+            "Scene clarity",
+            blur_score,
+            impact,
+            f"Blur score is {blur_score}/100, which can make the signal noisier and weaken confidence in the current reading surface.",
+            100.0 - blur_score,
+        )
+
+    brightness_score = _optional_score_100(latest_state.get("brightness_score"))
+    if brightness_score is not None and (brightness_score < 14 or brightness_score > 88):
+        impact = "high" if brightness_score < 8 or brightness_score > 94 else "medium"
+        brightness_note = "too dim" if brightness_score < 14 else "too bright"
+        add_driver(
+            "brightness_score",
+            "Brightness",
+            brightness_score,
+            impact,
+            f"Brightness is {brightness_score}/100 and looks {brightness_note} for a stable {task_mode} signal.",
+            abs(brightness_score - 50.0),
+        )
+
+    if latest_state.get("distraction"):
+        add_driver(
+            "distraction",
+            "Reported distraction",
+            latest_state.get("distraction"),
+            "medium",
+            f"Reported distraction: {latest_state.get('distraction')}. This is directly competing with the current study goal.",
+            62.0,
+        )
+    if latest_state.get("support_needed"):
+        add_driver(
+            "support_needed",
+            "Open support need",
+            latest_state.get("support_needed"),
+            "medium",
+            "There is still an open support request, which usually raises load and slows recovery.",
+            56.0,
+        )
+
+    unresolved_count = len(
+        [item for item in focus_signals[-4:] if isinstance(item, dict) and not _safe_bool(item.get("resolved"), default=False)]
+    )
+    if unresolved_count:
+        add_driver(
+            "unresolved_signals",
+            "Unresolved blockers",
+            unresolved_count,
+            "medium" if unresolved_count < 3 else "high",
+            f"There are {unresolved_count} unresolved recent blocker signals, so the state has not fully settled yet.",
+            min(100.0, 30.0 + (unresolved_count * 16.0)),
+        )
+
+    drivers.sort(key=lambda item: (0 if item["impact"] == "high" else 1, -item["score"]))
+    primary_driver = drivers[0] if drivers else {}
+    secondary_drivers = drivers[1:4]
+    state_hint = _normalize_guardian_state_hint(latest_state.get("state_hint")) or "stable"
+    state_hint_label = _guardian_state_hint_label(state_hint)
+
+    why_this_state = f"The guardian marked this state as {state_hint_label.lower()}."
+    if primary_driver:
+        why_this_state = (
+            f"The guardian marked this state as {state_hint_label.lower()} mainly because "
+            f"{primary_driver.get('label', 'the top signal').lower()} is driving the pattern."
+        )
+
+    top_intervention = "Capture one more clean snapshot after the next focused block."
+    if primary_driver:
+        intervention_map = {
+            "Task switching": "Reduce context switching first by keeping one surface open and hiding extra tabs or notifications.",
+            "Cognitive load": "Reduce load first by shrinking the next checkpoint and removing any optional subtask.",
+            "Fatigue pressure": "Shorten the next work block and take a recovery reset before pushing further.",
+            "Signal uncertainty": "Collect one cleaner snapshot before changing the study plan so the signal can settle.",
+            "Behavior alignment": "Realign the study behavior to the current task mode before trying to increase speed.",
+            "Scene switching": "Stabilize the study environment and remove visual context changes before continuing.",
+            "Scene lock": "Re-anchor the study surface so the learner has one clear visual target.",
+            "Orientation drift": "Bring gaze and head alignment back to the study surface for one short block.",
+            "Movement intensity": "Reduce physical movement and return to one stable work posture for the next checkpoint.",
+            "Scene clarity": "Improve the visibility of the study surface before trusting the next state snapshot.",
+            "Brightness": "Adjust lighting first so the signal is easier to read.",
+            "Reported distraction": "Remove the named distraction before resuming the task.",
+            "Open support need": "Resolve the open support need before pushing into a harder segment.",
+            "Unresolved blockers": "Clear the unresolved blockers one by one so the state can settle.",
+        }
+        top_intervention = intervention_map.get(primary_driver.get("label"), top_intervention)
+
+    return {
+        "why_this_state": why_this_state,
+        "primary_driver": primary_driver,
+        "secondary_drivers": secondary_drivers,
+        "drivers": drivers[:6],
+        "top_intervention": top_intervention,
+        "risk_flags": risk_flags[:5],
+    }
+
+
 def _build_learning_state_review(mission):
     state = _ensure_payload_dict(mission.get("learning_state_guardian"))
     history = [item for item in state.get("state_history", []) if isinstance(item, dict)]
@@ -3477,6 +3705,7 @@ def _build_learning_state_review(mission):
         _guardian_difficulty_public_event(item, status="resolved")
         for item in [entry for entry in state.get("difficulty_events", []) if isinstance(entry, dict)][-4:]
     ]
+    state_explanation = _guardian_state_explanation(latest_state, signals, risk_flags)
     recent_hints = [
         _normalize_guardian_state_hint(item.get("state_hint"))
         for item in recent_history
@@ -3555,6 +3784,7 @@ def _build_learning_state_review(mission):
         "state_history_count": len(history),
         "recent_focus_signals": signals[-4:],
         "risk_flags": risk_flags,
+        "state_explanation": state_explanation,
         "difficulty_tracking": {
             "active_event": active_difficulty_event,
             "recent_events": recent_difficulty_events,
@@ -4357,11 +4587,21 @@ def _build_learning_state_chat_reply(message, mission):
     review = _build_learning_state_review(mission)
     latest = review.get("latest_state", {}) or {}
     active_difficulty_event = _ensure_payload_dict(review.get("difficulty_tracking", {})).get("active_event") or {}
+    state_explanation = _ensure_payload_dict(review.get("state_explanation"))
     lowered = (message or "").lower()
     if not message:
         return (
             "Learning-state guardian is online. Tell me your current task, focus, fatigue, and load so I can spot the biggest risk."
         )
+    if "why" in lowered or "reason" in lowered or "explain" in lowered:
+        primary_driver = _ensure_payload_dict(state_explanation.get("primary_driver"))
+        if primary_driver:
+            return (
+                f"{state_explanation.get('why_this_state', 'The guardian has a state explanation ready.')} "
+                f"The top driver is {primary_driver.get('label', 'the current signal').lower()}: "
+                f"{primary_driver.get('explanation', 'it is contributing the most to the current state.')}"
+            )
+        return "The current state looks relatively stable, so there is no dominant explanation driver yet."
     if "focus" in lowered or "distracted" in lowered:
         if active_difficulty_event:
             return (
