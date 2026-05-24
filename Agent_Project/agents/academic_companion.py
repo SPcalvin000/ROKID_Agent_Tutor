@@ -35,6 +35,7 @@ CAPABILITY_PRESENTATION = "presentation"
 CAPABILITY_REFLECTION = "reflection_coach"
 CAPABILITY_GUARDIAN = "learning_state_guardian"
 SUPPORTED_EVENT_TYPES = ("text_chat", "state_update", "difficulty_event", "session_review")
+REFLECTION_MODEL_PROVIDERS = {"ollama", "remote", "openai"}
 PRESENTATION_OPERATIONS = (
     "upsert_mission",
     "extract_intake",
@@ -1294,6 +1295,16 @@ def _normalize_reflection_payload(payload, event_type):
             max_length=2000,
             preserve_lines=True,
         )
+        payload["learner_note"] = _safe_text(
+            _first_present_value(payload, ("learner_note", "note")),
+            max_length=1200,
+            preserve_lines=True,
+        )
+        payload["next_goal"] = _safe_text(
+            _first_present_value(payload, ("next_goal", "goal")),
+            max_length=240,
+            preserve_lines=True,
+        )
         return payload
 
     if event_type == "state_update":
@@ -1310,6 +1321,25 @@ def _normalize_reflection_payload(payload, event_type):
                 raw_operation = "capture_reflection"
         operation = _canonical_operation(CAPABILITY_REFLECTION, raw_operation)
         payload["operation"] = operation
+        payload["learner_note"] = _safe_text(
+            _first_present_value(payload, ("learner_note", "note")),
+            max_length=1200,
+            preserve_lines=True,
+        )
+        payload["next_goal"] = _safe_text(
+            _first_present_value(payload, ("next_goal", "goal")),
+            max_length=240,
+            preserve_lines=True,
+        )
+        payload["provider_override"] = _safe_text(
+            _first_present_value(payload, ("provider_override", "provider")),
+            max_length=40,
+        )
+        payload["model_override"] = _safe_text(
+            _first_present_value(payload, ("model_override", "model")),
+            max_length=120,
+        )
+        payload["use_llm"] = _safe_bool(_first_present_value(payload, ("use_llm", "llm", "model_polish")), default=False)
         if operation == "set_reflection_focus":
             payload["focus_theme"] = _safe_text(
                 _first_present_value(payload, ("focus_theme", "theme", "focus", "current_focus")),
@@ -3160,6 +3190,11 @@ def _default_reflection_state(created_at=""):
         "focus_theme": "",
         "current_course": "",
         "target_habit": "",
+        "learner_note": "",
+        "next_goal": "",
+        "provider_override": "",
+        "model_override": "",
+        "use_llm": False,
         "latest_reflection": {},
         "reflection_history": [],
         "action_commitments": [],
@@ -3208,6 +3243,19 @@ def _ensure_mission_extensions(mission):
         for item in reflection_state.get("wins", [])
         if _safe_text(item, max_length=280, preserve_lines=True)
     ][-MAX_HISTORY:]
+    reflection_state["learner_note"] = _safe_text(
+        reflection_state.get("learner_note"),
+        max_length=1200,
+        preserve_lines=True,
+    )
+    reflection_state["next_goal"] = _safe_text(
+        reflection_state.get("next_goal"),
+        max_length=240,
+        preserve_lines=True,
+    )
+    reflection_state["provider_override"] = _normalize_reflection_provider(reflection_state.get("provider_override"))
+    reflection_state["model_override"] = _safe_text(reflection_state.get("model_override"), max_length=120)
+    reflection_state["use_llm"] = _safe_bool(reflection_state.get("use_llm"), default=False)
     mission["reflection_coach"] = reflection_state
 
     guardian_state = mission.get("learning_state_guardian")
@@ -3336,6 +3384,103 @@ def _reflection_mode_label(task_mode):
     return normalized.replace("-", " ").title()
 
 
+def _normalize_reflection_provider(value):
+    normalized = _safe_text(value, max_length=40).lower()
+    if normalized in {"", "default"}:
+        return "auto"
+    if normalized in {"heuristic", "ollama", "remote", "openai", "auto"}:
+        return normalized
+    return "heuristic"
+
+
+def _reflection_provider_label(provider):
+    mapping = {
+        "auto": "Default Provider",
+        "heuristic": "Heuristic",
+        "ollama": "Ollama Local",
+        "remote": "Remote API",
+        "openai": "OpenAI",
+    }
+    return mapping.get(_normalize_reflection_provider(provider), "Heuristic")
+
+
+def _configured_reflection_provider():
+    provider = _normalize_reflection_provider(os.getenv("LLM_PROVIDER", "ollama"))
+    return "ollama" if provider == "auto" else provider
+
+
+def _reflection_provider_model_name(provider, model_override=""):
+    cleaned_override = _safe_text(model_override, max_length=120)
+    if cleaned_override:
+        return cleaned_override
+    provider = _normalize_reflection_provider(provider)
+    if provider == "ollama":
+        return os.getenv("OLLAMA_MODEL", "qwen3:4b").strip() or "qwen3:4b"
+    if provider == "remote":
+        return os.getenv("REFLECTION_REMOTE_LABEL", "remote-reflection-service").strip() or "remote-reflection-service"
+    if provider == "openai":
+        return os.getenv("OPENAI_MODEL", "gpt-4.1-mini").strip() or "gpt-4.1-mini"
+    return ""
+
+
+def _reflection_provider_options():
+    return [
+        {"value": "auto", "label": "Use Default Provider"},
+        {"value": "heuristic", "label": "Heuristic Only"},
+        {"value": "ollama", "label": "Ollama Local"},
+        {"value": "remote", "label": "Remote API"},
+        {"value": "openai", "label": "OpenAI"},
+    ]
+
+
+def _reflection_provider_is_configured(provider):
+    provider = _normalize_reflection_provider(provider)
+    if provider in {"auto", "heuristic"}:
+        return True
+    if provider == "ollama":
+        return bool(_reflection_provider_model_name("ollama")) and bool(
+            os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434/api").strip()
+        )
+    if provider == "remote":
+        return bool(os.getenv("REFLECTION_REMOTE_URL", "").strip())
+    if provider == "openai":
+        return bool(os.getenv("OPENAI_API_KEY", "").strip())
+    return False
+
+
+def _reflection_any_model_provider_configured():
+    return any(_reflection_provider_is_configured(provider) for provider in REFLECTION_MODEL_PROVIDERS)
+
+
+def _reflection_generation_meta(requested_provider="auto", configured_provider="ollama", model_override="", note=""):
+    requested_provider = _normalize_reflection_provider(requested_provider)
+    configured_provider = _normalize_reflection_provider(configured_provider)
+    resolved_provider = "heuristic"
+    provider_for_note = configured_provider if requested_provider == "auto" else requested_provider
+    if requested_provider == "heuristic":
+        fallback_note = "Heuristic mode is active. Turn on model polish only if you want a provider-backed wording pass."
+    else:
+        fallback_note = (
+            f"Heuristic mode is active. The configured default provider is {_reflection_provider_label(configured_provider)}. "
+            "If that provider is unavailable at runtime, the coach will still fall back safely."
+        )
+    return {
+        "mode": "heuristic",
+        "used_llm": False,
+        "llm_available": _reflection_any_model_provider_configured(),
+        "requested_provider": requested_provider,
+        "resolved_provider": resolved_provider,
+        "configured_provider": configured_provider,
+        "provider_available": _reflection_provider_is_configured(provider_for_note),
+        "provider_label": _reflection_provider_label(resolved_provider),
+        "configured_label": _reflection_provider_label(configured_provider),
+        "model": "",
+        "configured_model": _reflection_provider_model_name(configured_provider, model_override=model_override),
+        "model_override": _safe_text(model_override, max_length=120),
+        "note": _safe_text(note, max_length=360, preserve_lines=True) or fallback_note,
+    }
+
+
 def _reflection_focus_window_label(context):
     active_event = _ensure_payload_dict(context.get("active_event"))
     if active_event.get("time_window"):
@@ -3377,6 +3522,11 @@ def _reflection_context_from_mission(mission, state, history, latest):
         "current_course": state.get("current_course", ""),
         "target_habit": state.get("target_habit", ""),
         "focus_theme": state.get("focus_theme", ""),
+        "learner_note": state.get("learner_note", ""),
+        "next_goal": state.get("next_goal", ""),
+        "provider_override": state.get("provider_override", ""),
+        "model_override": state.get("model_override", ""),
+        "use_llm": _safe_bool(state.get("use_llm"), default=False),
         "latest_reflection": latest,
         "reflection_count": len(history),
         "updated_at": guardian_review.get("updated_at", ""),
@@ -3493,12 +3643,16 @@ def _build_reflection_coach_summary(signature, context, latest):
     note_text = ""
     if latest.get("what_was_hard"):
         note_text = f" The latest reflection named this difficulty: {latest.get('what_was_hard')}."
+    learner_note = _safe_text(context.get("learner_note"), max_length=1200, preserve_lines=True)
+    next_goal = _safe_text(context.get("next_goal"), max_length=240, preserve_lines=True)
+    learner_line = f' Learner note: "{learner_note}".' if learner_note else ""
+    goal_line = f' The next session goal is "{next_goal}".' if next_goal else ""
     return {
         "headline": signature.get("title", "Reflection coach summary"),
         "overview": (
             f"This {mode_label.lower()} pattern is currently reading around focus "
             f"{focus_score if focus_score is not None else 'n/a'}/100, load {int(round(avg_load))}, "
-            f"and fatigue {int(round(avg_fatigue))}. {event_text}{note_text}"
+            f"and fatigue {int(round(avg_fatigue))}. {event_text}{note_text}{learner_line}{goal_line}"
         ),
         "why_it_matters": (
             f"{signature.get('detail', '')} The current evidence suggests that the review should focus on "
@@ -3597,7 +3751,12 @@ def _build_reflection_questions(signature, context):
 def _build_reflection_experiments(signature, context):
     key = signature.get("key", "mixed_regulation")
     target_habit = _safe_text(context.get("target_habit"), max_length=160)
-    goal_suffix = f" while reinforcing {target_habit}" if target_habit else ""
+    next_goal = _safe_text(context.get("next_goal"), max_length=240)
+    goal_suffix = ""
+    if next_goal:
+        goal_suffix = f" while aiming for {next_goal}"
+    elif target_habit:
+        goal_suffix = f" while reinforcing {target_habit}"
 
     if key == "productive_challenge":
         return [
@@ -3769,11 +3928,17 @@ def _build_reflection_coach_memo(signature, context, coach_summary, latest):
         reflection_note = f" Current learner lesson: {latest.get('lesson')}."
     elif latest.get("what_was_hard"):
         reflection_note = f" Current blocker: {latest.get('what_was_hard')}."
+    learner_line = ""
+    if context.get("learner_note"):
+        learner_line = f" Learner note: {context.get('learner_note')}."
+    goal_line = ""
+    if context.get("next_goal"):
+        goal_line = f" Next goal: {context.get('next_goal')}."
     return (
         f"{coach_summary.get('headline', 'Reflection coach summary')} "
         f"Latest focus is {core_metrics.get('focus_score', 'n/a')}/100 with load "
         f"{core_metrics.get('cognitive_load', 'n/a')}/100 and fatigue {core_metrics.get('fatigue_risk', 'n/a')}/100."
-        f"{event_line} The next coaching boundary is: {signature.get('next_boundary', '')}.{reflection_note}"
+        f"{event_line} The next coaching boundary is: {signature.get('next_boundary', '')}.{reflection_note}{learner_line}{goal_line}"
     ).strip()
 
 
@@ -3792,6 +3957,12 @@ def _build_reflection_review(mission):
     next_session_experiments = _build_reflection_experiments(signature, context)
     evidence_cards = _build_reflection_evidence_cards(signature, context)
     coach_memo = _build_reflection_coach_memo(signature, context, coach_summary, latest)
+    configured_provider = _configured_reflection_provider()
+    generation = _reflection_generation_meta(
+        requested_provider=context.get("provider_override") or "auto",
+        configured_provider=configured_provider,
+        model_override=context.get("model_override", ""),
+    )
 
     theme_counter = Counter()
     for item in history[-6:]:
@@ -3818,6 +3989,14 @@ def _build_reflection_review(mission):
         "focus_theme": state.get("focus_theme", ""),
         "current_course": state.get("current_course", ""),
         "target_habit": state.get("target_habit", ""),
+        "learner_note": state.get("learner_note", ""),
+        "next_goal": state.get("next_goal", ""),
+        "module_boundary": (
+            "This module coaches reflection on learning process and self-regulation. "
+            "It does not teach the content itself, replace tutoring, or overlap with note-taking features."
+        ),
+        "provider_options": _reflection_provider_options(),
+        "configured_provider": configured_provider,
         "signature": signature,
         "coach_summary": coach_summary,
         "coach_cards": coach_cards,
@@ -3830,6 +4009,7 @@ def _build_reflection_review(mission):
         "next_session_experiments": next_session_experiments,
         "evidence_cards": evidence_cards,
         "coach_memo": coach_memo,
+        "generation": generation,
         "coach_message": coach_message,
         "updated_at": state.get("updated_at", ""),
     }
@@ -4371,6 +4551,8 @@ def _mission_payload(mission):
             "focus_theme": reflection_state.get("focus_theme", ""),
             "current_course": reflection_state.get("current_course", ""),
             "target_habit": reflection_state.get("target_habit", ""),
+            "learner_note": reflection_state.get("learner_note", ""),
+            "next_goal": reflection_state.get("next_goal", ""),
             "latest_reflection": copy.deepcopy(reflection_state.get("latest_reflection", {})),
             "recent_commitments": copy.deepcopy(reflection_state.get("action_commitments", [])[-5:]),
             "recent_wins": copy.deepcopy(reflection_state.get("wins", [])[-5:]),
@@ -4713,6 +4895,28 @@ def _record_rehearsal(mission, payload):
 def _apply_reflection_update(mission, payload, operation):
     state = _ensure_payload_dict(mission.get("reflection_coach"))
     recorded_at = _now_iso()
+    learner_note = _safe_text(payload.get("learner_note"), max_length=1200, preserve_lines=True)
+    next_goal = _safe_text(payload.get("next_goal"), max_length=240, preserve_lines=True)
+    if learner_note:
+        state["learner_note"] = learner_note
+    if next_goal:
+        state["next_goal"] = next_goal
+    provider_override_raw = _safe_text(payload.get("provider_override"), max_length=40)
+    provider_override = _normalize_reflection_provider(provider_override_raw)
+    if provider_override_raw and provider_override != "auto":
+        state["provider_override"] = provider_override
+    elif provider_override_raw:
+        state["provider_override"] = provider_override
+    model_override_raw = _safe_text(payload.get("model_override"), max_length=120)
+    model_override = model_override_raw
+    if model_override:
+        state["model_override"] = model_override
+    elif model_override_raw == "":
+        pass
+    elif payload.get("model_override") is not None:
+        state["model_override"] = ""
+    if payload.get("use_llm") is not None:
+        state["use_llm"] = _safe_bool(payload.get("use_llm"), default=False)
 
     if operation == "set_reflection_focus":
         state["focus_theme"] = _safe_text(payload.get("focus_theme"), max_length=180) or state.get("focus_theme", "")
@@ -4728,6 +4932,8 @@ def _apply_reflection_update(mission, payload, operation):
             "focus_theme": state.get("focus_theme", ""),
             "current_course": state.get("current_course", ""),
             "target_habit": state.get("target_habit", ""),
+            "learner_note": state.get("learner_note", ""),
+            "next_goal": state.get("next_goal", ""),
         }
 
     if operation in {"capture_reflection", "log_reflection"}:
@@ -4771,6 +4977,8 @@ def _apply_reflection_update(mission, payload, operation):
             "operation": operation,
             "reflection_entry": reflection_entry,
             "reflection_count": len(history),
+            "learner_note": state.get("learner_note", ""),
+            "next_goal": state.get("next_goal", ""),
         }
 
     if operation == "plan_next_step":
@@ -4793,6 +5001,7 @@ def _apply_reflection_update(mission, payload, operation):
             "operation": operation,
             "planned_steps": normalized_steps,
             "recent_commitments": commitments[-5:],
+            "next_goal": state.get("next_goal", ""),
         }
 
     raise ValueError(f"Unsupported reflection operation: {operation}")
@@ -5021,6 +5230,16 @@ def _build_reflection_chat_reply(message, mission):
     lowered = (message or "").lower()
     if not message:
         return "Reflection coach is ready. Share what happened, what felt hard, and what you want to do differently next time."
+    if "goal" in lowered or "aim" in lowered:
+        if review.get("next_goal"):
+            return f"Your current next-session goal is: {review.get('next_goal')}. Keep the next reflection tied to that boundary."
+        return "Set one next-session goal so the reflection can stay anchored to a concrete outcome."
+    if "note" in lowered or "memo" in lowered:
+        if review.get("coach_memo"):
+            return review["coach_memo"]
+        if review.get("learner_note"):
+            return f"Your saved learner note is: {review.get('learner_note')}"
+        return "Save one learner note if you want the coach memo to anchor around your own wording."
     if "question" in lowered or "prompt" in lowered:
         questions = review.get("reflection_questions", [])
         if questions:
