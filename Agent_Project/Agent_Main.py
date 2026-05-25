@@ -2,6 +2,7 @@
 import asyncio
 import websockets
 import json
+import sys
 from datetime import datetime
 
 # 导入我们的子系统模块 (后续开发了新模块，只需在这里 import 即可)
@@ -12,9 +13,19 @@ from agents import academic_companion
 # from agents import essay_grading
 # from agents import note_assistant
 
+
+def _safe_log(message):
+    try:
+        print(message)
+    except UnicodeEncodeError:
+        encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+        safe_message = message.encode(encoding, errors="replace").decode(encoding, errors="replace")
+        sys.stdout.write(safe_message + "\n")
+
+
 async def handle_client(websocket):
     client_addr = websocket.remote_address
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] ⚡ 客户端 {client_addr} 已连接！")
+    _safe_log(f"[{datetime.now().strftime('%H:%M:%S')}] ⚡ 客户端 {client_addr} 已连接！")
     try:
         async for message in websocket:
             try:
@@ -26,7 +37,7 @@ async def handle_client(websocket):
                 session_id = data.get("session_id", "anonymous")
                 payload = data.get("payload", {})
 
-                print(
+                _safe_log(
                     f"\n[{datetime.now().strftime('%H:%M:%S')}] 📥 收到任务路由请求: Agent=[{agent_type}], Event=[{event_type}]")
 
                 # 2. 核心路由枢纽 (Router)
@@ -60,19 +71,19 @@ async def handle_client(websocket):
                     "response": response_data
                 }
                 await websocket.send(json.dumps(response_json))
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] 📤 处理完成，结果已回传。")
+                _safe_log(f"[{datetime.now().strftime('%H:%M:%S')}] 📤 处理完成，结果已回传。")
 
             except json.JSONDecodeError:
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ 收到非 JSON 格式数据。")
+                _safe_log(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ 收到非 JSON 格式数据。")
                 await websocket.send(json.dumps({"error": "Only JSON format is supported."}))
 
     except websockets.exceptions.ConnectionClosed:
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ 客户端 {client_addr} 已断开。")
+        _safe_log(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ 客户端 {client_addr} 已断开。")
 
 
 async def main():
-    print("🚀 Agent 综合网关 (Gateway) 已启动！")
-    print("正在监听 ws://0.0.0.0:8765 ...")
+    _safe_log("🚀 Agent 综合网关 (Gateway) 已启动！")
+    _safe_log("正在监听 ws://0.0.0.0:8765 ...")
     async with websockets.serve(handle_client, "0.0.0.0", 8765):
         await asyncio.Future()
 
