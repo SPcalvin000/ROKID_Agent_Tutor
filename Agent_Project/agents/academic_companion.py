@@ -3353,6 +3353,8 @@ def _default_learning_state_guardian(created_at=""):
         "recent_trend_window": {},
         "state_transition_summary": {},
         "recovery_confidence": {},
+        "continuity_profile": {},
+        "intervention_plan": {},
         "updated_at": timestamp,
     }
 
@@ -4683,6 +4685,188 @@ def _build_guardian_recovery_confidence(latest_state, baseline, tracker, risk_fl
     }
 
 
+def _build_guardian_continuity_profile(history, latest_state, transition_summary=None, recovery_confidence=None, active_event=None):
+    history = _guardian_recent_window(history)
+    latest_state = latest_state if isinstance(latest_state, dict) else {}
+    transition_summary = transition_summary if isinstance(transition_summary, dict) else {}
+    recovery_confidence = recovery_confidence if isinstance(recovery_confidence, dict) else {}
+    active_event = active_event if isinstance(active_event, dict) else {}
+    if not history and not latest_state:
+        return {}
+
+    if not history and latest_state:
+        history = [latest_state]
+
+    def metric_volatility(field):
+        values = []
+        for item in history:
+            if not isinstance(item, dict):
+                continue
+            value = item.get(field)
+            if value in (None, ""):
+                continue
+            values.append(_safe_float(value, default=0.0))
+        if len(values) < 2:
+            return 0.0
+        deltas = [abs(values[idx] - values[idx - 1]) for idx in range(1, len(values))]
+        return round(sum(deltas) / len(deltas), 1)
+
+    focus_volatility = metric_volatility("focus_score")
+    load_volatility = metric_volatility("cognitive_load")
+    alignment_volatility = metric_volatility("behavioral_alignment")
+    fatigue_volatility = metric_volatility("fatigue_risk")
+
+    volatility_index = round(
+        min(
+            100.0,
+            (focus_volatility * 0.30)
+            + (load_volatility * 0.30)
+            + (alignment_volatility * 0.22)
+            + (fatigue_volatility * 0.18),
+        ),
+        1,
+    )
+
+    continuity_score = 100.0 - volatility_index
+    transition_type = transition_summary.get("transition_type")
+    if transition_type == "mode_shift":
+        continuity_score -= 14.0
+    elif transition_type == "worsening":
+        continuity_score -= 10.0
+    elif transition_type == "recovery":
+        continuity_score += 8.0
+    elif transition_type == "steady":
+        continuity_score += 4.0
+
+    if active_event:
+        continuity_score -= 24.0
+
+    recovery_label = _safe_text(recovery_confidence.get("label"), max_length=20).lower()
+    if recovery_label == "high":
+        continuity_score += 8.0
+    elif recovery_label == "low":
+        continuity_score -= 10.0
+
+    continuity_score = round(max(0.0, min(100.0, continuity_score)), 1)
+    if continuity_score >= 74.0:
+        stability_band = "stable"
+    elif continuity_score >= 46.0:
+        stability_band = "mixed"
+    else:
+        stability_band = "volatile"
+
+    if stability_band == "stable":
+        summary = "The guardian sees this study state as relatively stable across the recent window."
+    elif stability_band == "mixed":
+        summary = "The guardian sees partial stability, but the recent window still shows meaningful swings."
+    else:
+        summary = "The guardian sees a volatile state pattern, so short-term interventions matter more than long planning."
+
+    return {
+        "continuity_score": continuity_score,
+        "stability_band": stability_band,
+        "volatility_index": volatility_index,
+        "focus_volatility": focus_volatility,
+        "load_volatility": load_volatility,
+        "behavioral_volatility": alignment_volatility,
+        "fatigue_volatility": fatigue_volatility,
+        "window_size": len(history),
+        "summary": summary,
+    }
+
+
+def _build_guardian_intervention_plan(
+    latest_state,
+    state_explanation,
+    recent_trend_window,
+    recovery_confidence,
+    transition_summary,
+    active_event,
+    risk_flags,
+):
+    latest_state = latest_state if isinstance(latest_state, dict) else {}
+    state_explanation = state_explanation if isinstance(state_explanation, dict) else {}
+    recent_trend_window = recent_trend_window if isinstance(recent_trend_window, dict) else {}
+    recovery_confidence = recovery_confidence if isinstance(recovery_confidence, dict) else {}
+    transition_summary = transition_summary if isinstance(transition_summary, dict) else {}
+    active_event = active_event if isinstance(active_event, dict) else {}
+    risk_flags = risk_flags if isinstance(risk_flags, list) else []
+
+    primary_driver = _ensure_payload_dict(state_explanation.get("primary_driver"))
+    driver_label = _safe_text(primary_driver.get("label"), max_length=80)
+    driver_key = _safe_text(primary_driver.get("key"), max_length=80).lower()
+    transition_type = _safe_text(transition_summary.get("transition_type"), max_length=40).lower()
+    recovery_label = _safe_text(recovery_confidence.get("label"), max_length=20).lower()
+    trend_signals = _ensure_payload_dict(recent_trend_window.get("signals"))
+    load_trend = _ensure_payload_dict(trend_signals.get("cognitive_load"))
+    fatigue_trend = _ensure_payload_dict(trend_signals.get("fatigue_risk"))
+    switching_trend = _ensure_payload_dict(trend_signals.get("switching_index"))
+    uncertainty_trend = _ensure_payload_dict(trend_signals.get("uncertainty_score"))
+
+    category = "maintain_focus"
+    priority = "medium"
+    immediate_action = "Keep the next block narrow and log one more clean state snapshot."
+    next_checkpoint = "Re-check the guardian state after the next focused block."
+    rationale = state_explanation.get("why_this_state", "The guardian is using the current state pattern to suggest the next action.")
+
+    if active_event:
+        priority = "high"
+        next_checkpoint = "Check again after the active guardian event has been intentionally addressed."
+        if "switch" in driver_key or "switch" in driver_label.lower():
+            category = "switching_containment"
+            immediate_action = "Close extra tabs or surfaces and keep only one study target open for the next block."
+        elif "fatigue" in driver_key or "fatigue" in driver_label.lower():
+            category = "fatigue_reset"
+            immediate_action = "Take a short recovery reset and restart with a smaller checkpoint instead of pushing through."
+        elif "uncertainty" in driver_key or "signal" in driver_label.lower():
+            category = "signal_cleanup"
+            immediate_action = "Stabilize the study setup first and capture one cleaner snapshot before making a bigger decision."
+        else:
+            category = "load_trim"
+            immediate_action = "Shrink the task scope immediately and remove one friction point before continuing."
+    elif transition_type == "worsening" or load_trend.get("direction") == "worsening":
+        category = "load_trim"
+        priority = "high" if recovery_label == "low" else "medium"
+        immediate_action = "Reduce the next checkpoint so the learner only has one visible sub-goal to finish."
+        next_checkpoint = "Review the load signal after one smaller checkpoint instead of a full study block."
+    elif fatigue_trend.get("direction") == "worsening" or _safe_text(latest_state.get("fatigue_level"), max_length=20).lower() == "high":
+        category = "fatigue_reset"
+        priority = "high" if recovery_label == "low" else "medium"
+        immediate_action = "Shorten the next work block and recover before attempting another deep-focus segment."
+        next_checkpoint = "Capture a fresh snapshot after the recovery reset."
+    elif switching_trend.get("direction") == "worsening" or "switching" in driver_key or "scene switching" in driver_label.lower():
+        category = "switching_containment"
+        priority = "medium"
+        immediate_action = "Reduce context switching by committing to one surface and one next action only."
+        next_checkpoint = "Check whether switching and drift drop after one stable block."
+    elif uncertainty_trend.get("direction") == "worsening" or recovery_label == "low":
+        category = "signal_cleanup"
+        priority = "medium"
+        immediate_action = "Clean up the study setup and capture one clearer signal before making a plan change."
+        next_checkpoint = "Collect one cleaner state snapshot in the same task mode."
+    elif transition_type == "recovery" and recovery_label in {"medium", "high"}:
+        category = "recovery_hold"
+        priority = "low"
+        immediate_action = "Hold the current routine steady for one more block instead of changing strategy again."
+        next_checkpoint = "Confirm that the recovered state remains stable across one more block."
+    elif risk_flags:
+        category = "risk_first"
+        priority = "medium"
+        immediate_action = f"Address the top risk first: {risk_flags[0]}."
+        next_checkpoint = "Re-check the guardian after the top risk has been reduced."
+
+    summary = f"Priority: {priority}. Immediate action: {immediate_action}"
+    return {
+        "category": category,
+        "priority": priority,
+        "driver_label": driver_label,
+        "immediate_action": immediate_action,
+        "next_checkpoint": next_checkpoint,
+        "rationale": rationale,
+        "summary": summary,
+    }
+
+
 def _refresh_guardian_derived_state(state):
     state = _ensure_payload_dict(state)
     history = [item for item in state.get("state_history", []) if isinstance(item, dict)]
@@ -4709,6 +4893,24 @@ def _refresh_guardian_derived_state(state):
         risk_flags,
         transition_summary=transition_summary,
     )
+    active_event = tracker.get("active_event") if isinstance(tracker.get("active_event"), dict) else {}
+    continuity_profile = _build_guardian_continuity_profile(
+        history,
+        latest_state,
+        transition_summary=transition_summary,
+        recovery_confidence=recovery_confidence,
+        active_event=active_event,
+    )
+    state_explanation = _guardian_state_explanation(latest_state, signals, risk_flags)
+    intervention_plan = _build_guardian_intervention_plan(
+        latest_state,
+        state_explanation,
+        trend_window,
+        recovery_confidence,
+        transition_summary,
+        active_event,
+        risk_flags,
+    )
 
     state["task_mode"] = task_mode
     state["risk_flags"] = risk_flags
@@ -4716,6 +4918,9 @@ def _refresh_guardian_derived_state(state):
     state["recent_trend_window"] = trend_window
     state["state_transition_summary"] = transition_summary
     state["recovery_confidence"] = recovery_confidence
+    state["state_explanation"] = state_explanation
+    state["continuity_profile"] = continuity_profile
+    state["intervention_plan"] = intervention_plan
     return state
 
 
@@ -4754,11 +4959,13 @@ def _build_learning_state_review(mission):
         _guardian_difficulty_public_event(item, status="resolved")
         for item in [entry for entry in state.get("difficulty_events", []) if isinstance(entry, dict)][-4:]
     ]
-    state_explanation = _guardian_state_explanation(latest_state, signals, risk_flags)
+    state_explanation = _ensure_payload_dict(state.get("state_explanation")) or _guardian_state_explanation(latest_state, signals, risk_flags)
     personal_baseline = _ensure_payload_dict(state.get("personal_baseline"))
     recent_trend_window = _ensure_payload_dict(state.get("recent_trend_window"))
     state_transition_summary = _ensure_payload_dict(state.get("state_transition_summary"))
     recovery_confidence = _ensure_payload_dict(state.get("recovery_confidence"))
+    continuity_profile = _ensure_payload_dict(state.get("continuity_profile"))
+    intervention_plan = _ensure_payload_dict(state.get("intervention_plan"))
     recent_hints = [
         _normalize_guardian_state_hint(item.get("state_hint"))
         for item in recent_history
@@ -4785,27 +4992,28 @@ def _build_learning_state_review(mission):
             threshold=8.0,
         ),
     }
-    coach_message = "Record one state snapshot with focus, load, and fatigue so the guardian can spot trends."
-    if dominant_state_hint == "fatigue_risk":
-        coach_message = "Fatigue risk is rising. Shorten the next block, reduce scope, and return only after a clear reset."
-    elif dominant_state_hint == "off_task_risk":
-        coach_message = "Your study behavior is drifting from the task. Remove one distraction and restate the next checkpoint before continuing."
-    elif active_difficulty_event:
-        coach_message = (
-            f"A sustained guardian event is active: {active_difficulty_event.get('primary_label') or 'study-state difficulty'}. "
-            "Treat this as a live intervention point before pushing deeper into the task."
-        )
-    elif dominant_state_hint == "signal_check":
-        coach_message = "The signal is still warming up. Capture one more clean snapshot before making a bigger study decision."
-    elif dominant_state_hint == "productive_struggle":
-        coach_message = "This looks like productive struggle. Stay with the current task, but keep the finish line narrow."
-    elif risk_flags:
-        coach_message = f"The main study-state risk is {risk_flags[0]}. Reduce one friction point before the next work block."
-    elif latest_state.get("current_task") or state.get("current_task"):
-        coach_message = (
-            f"Stay with {latest_state.get('current_task') or state.get('current_task')} until one visible checkpoint is finished, "
-            "then log the next state snapshot."
-        )
+    coach_message = _safe_text(intervention_plan.get("summary"), max_length=240) or "Record one state snapshot with focus, load, and fatigue so the guardian can spot trends."
+    if not intervention_plan:
+        if dominant_state_hint == "fatigue_risk":
+            coach_message = "Fatigue risk is rising. Shorten the next block, reduce scope, and return only after a clear reset."
+        elif dominant_state_hint == "off_task_risk":
+            coach_message = "Your study behavior is drifting from the task. Remove one distraction and restate the next checkpoint before continuing."
+        elif active_difficulty_event:
+            coach_message = (
+                f"A sustained guardian event is active: {active_difficulty_event.get('primary_label') or 'study-state difficulty'}. "
+                "Treat this as a live intervention point before pushing deeper into the task."
+            )
+        elif dominant_state_hint == "signal_check":
+            coach_message = "The signal is still warming up. Capture one more clean snapshot before making a bigger study decision."
+        elif dominant_state_hint == "productive_struggle":
+            coach_message = "This looks like productive struggle. Stay with the current task, but keep the finish line narrow."
+        elif risk_flags:
+            coach_message = f"The main study-state risk is {risk_flags[0]}. Reduce one friction point before the next work block."
+        elif latest_state.get("current_task") or state.get("current_task"):
+            coach_message = (
+                f"Stay with {latest_state.get('current_task') or state.get('current_task')} until one visible checkpoint is finished, "
+                "then log the next state snapshot."
+            )
 
     return {
         "current_task": state.get("current_task", ""),
@@ -4847,6 +5055,8 @@ def _build_learning_state_review(mission):
         "recent_trend_window": recent_trend_window,
         "state_transition_summary": state_transition_summary,
         "recovery_confidence": recovery_confidence,
+        "continuity_profile": continuity_profile,
+        "intervention_plan": intervention_plan,
         "trend_averages": averages,
         "trend_signals": trend_signals,
         "dominant_state_hint": dominant_state_hint,
@@ -5661,6 +5871,8 @@ def _apply_learning_state_update(mission, payload, operation):
             "personal_baseline": state.get("personal_baseline", {}),
             "state_transition_summary": state.get("state_transition_summary", {}),
             "recovery_confidence": state.get("recovery_confidence", {}),
+            "continuity_profile": state.get("continuity_profile", {}),
+            "intervention_plan": state.get("intervention_plan", {}),
         }
 
     if operation == "record_focus_signal":
@@ -5692,6 +5904,8 @@ def _apply_learning_state_update(mission, payload, operation):
             "focus_signal_count": len(signals),
             "difficulty_event": difficulty_event or {},
             "recovery_confidence": state.get("recovery_confidence", {}),
+            "continuity_profile": state.get("continuity_profile", {}),
+            "intervention_plan": state.get("intervention_plan", {}),
         }
 
     raise ValueError(f"Unsupported learning-state operation: {operation}")
@@ -5817,6 +6031,8 @@ def _build_learning_state_chat_reply(message, mission):
     recent_trend_window = _ensure_payload_dict(review.get("recent_trend_window"))
     recovery_confidence = _ensure_payload_dict(review.get("recovery_confidence"))
     transition_summary = _ensure_payload_dict(review.get("state_transition_summary"))
+    continuity_profile = _ensure_payload_dict(review.get("continuity_profile"))
+    intervention_plan = _ensure_payload_dict(review.get("intervention_plan"))
     lowered = (message or "").lower()
     if not message:
         return (
@@ -5861,6 +6077,21 @@ def _build_learning_state_chat_reply(message, mission):
         if transition_summary:
             return transition_summary.get("summary", "The guardian does not have a clear state transition summary yet.")
         return "The guardian needs at least two snapshots before it can summarize a state transition."
+    if "intervention" in lowered or "next step" in lowered or "what should" in lowered:
+        if intervention_plan:
+            return (
+                f"{intervention_plan.get('summary', 'The guardian has an intervention plan ready.')} "
+                f"Next checkpoint: {intervention_plan.get('next_checkpoint', 'Re-check after the next focused block.')}"
+            )
+        return "The guardian needs one more stable review before it can turn the state into a stronger intervention plan."
+    if "stable" in lowered or "stability" in lowered or "volatile" in lowered:
+        if continuity_profile:
+            return (
+                f"{continuity_profile.get('summary', 'The guardian has a continuity profile ready.')} "
+                f"Continuity score is {continuity_profile.get('continuity_score', 'n/a')}/100 "
+                f"({continuity_profile.get('stability_band', 'unknown')})."
+            )
+        return "The guardian needs a few more snapshots before it can describe state stability."
     if "focus" in lowered or "distracted" in lowered:
         if active_difficulty_event:
             return (

@@ -166,6 +166,7 @@ def run_sustained_event_flow(mod):
     assert_true(review["difficulty_tracking"]["event_count"] >= 1, "review should keep resolved guardian events")
     assert_true(review["difficulty_tracking"]["recent_events"], "review should expose recent guardian events")
     assert_true(review["recovery_confidence"]["label"] in {"medium", "high"}, "resolved recovery should raise recovery confidence")
+    assert_true(review["intervention_plan"]["category"], "review should expose an intervention plan after sustained events")
     print("PASS sustained_event")
 
 
@@ -234,13 +235,19 @@ def run_baseline_and_trend_flow(mod):
     assert_true(review["recent_trend_window"]["window_size"] >= 5, "guardian should expose a recent trend window")
     assert_true(review["state_transition_summary"]["transition_type"] in {"recovery", "steady", "mixed_shift"}, "guardian should summarize the latest transition")
     assert_true(review["recovery_confidence"]["score"] > 40, "guardian should expose recovery confidence after recovery snapshots")
+    assert_true(review["continuity_profile"]["stability_band"] in {"stable", "mixed", "volatile"}, "guardian should expose a continuity profile")
+    assert_true(review["intervention_plan"]["priority"] in {"low", "medium", "high"}, "guardian should expose intervention priority")
 
     baseline_reply = mod._build_learning_state_chat_reply("What is my baseline?", mission)
     trend_reply = mod._build_learning_state_chat_reply("Show me the trend.", mission)
     recovery_reply = mod._build_learning_state_chat_reply("Has my state recovered?", mission)
+    stability_reply = mod._build_learning_state_chat_reply("How stable is this state?", mission)
+    intervention_reply = mod._build_learning_state_chat_reply("What should I do next?", mission)
     assert_true("baseline" in baseline_reply.lower(), "baseline chat should reference the guardian baseline")
     assert_true("recent trend window" in trend_reply.lower(), "trend chat should reference the trend window")
     assert_true("recovery confidence" in recovery_reply.lower(), "recovery chat should mention recovery confidence")
+    assert_true("continuity score" in stability_reply.lower(), "stability chat should mention continuity score")
+    assert_true("next checkpoint" in intervention_reply.lower(), "intervention chat should mention the next checkpoint")
     print("PASS baseline_and_trend")
 
 
