@@ -320,6 +320,80 @@ def run_adaptive_threshold_flow(mod):
     print("PASS adaptive_thresholds")
 
 
+def run_longitudinal_profile_flow(mod):
+    store = mod._empty_store()
+    session_id = "guardian_smoke_longitudinal"
+
+    prior_mission = mod._build_default_mission(session_id, "guardian_longitudinal_prior")
+    prior_mission = mod._ensure_mission_extensions(prior_mission)
+    prior_context = mod._normalize_guardian_payload(
+        {
+            "current_task": "Read and annotate one theory section",
+            "session_goal": "Finish one clean annotation pass",
+            "task_mode": "reading",
+        },
+        "state_update",
+    )
+    mod._apply_learning_state_update(prior_mission, prior_context, prior_context["operation"])
+    for idx, seed in enumerate(
+        [
+            {"attention_score": 82, "fatigue_score": 22, "stress_score": 31, "clarity_score": 81},
+            {"attention_score": 80, "fatigue_score": 25, "stress_score": 33, "clarity_score": 78},
+            {"attention_score": 83, "fatigue_score": 21, "stress_score": 30, "clarity_score": 82},
+            {"attention_score": 81, "fatigue_score": 24, "stress_score": 32, "clarity_score": 79},
+        ]
+    ):
+        payload = mod._normalize_guardian_payload(
+            {
+                **seed,
+                "task_mode": "reading",
+                "progress_status": f"prior baseline {idx}",
+            },
+            "state_update",
+        )
+        mod._apply_learning_state_update(prior_mission, payload, payload["operation"])
+    store["missions"].append(prior_mission)
+
+    current_mission = mod._build_default_mission(session_id, "guardian_longitudinal_current")
+    current_mission = mod._ensure_mission_extensions(current_mission)
+    current_context = mod._normalize_guardian_payload(
+        {
+            "current_task": "Read and compare argument structure",
+            "session_goal": "Finish one comparison pass",
+            "task_mode": "reading",
+        },
+        "state_update",
+    )
+    mod._apply_learning_state_update(current_mission, current_context, current_context["operation"])
+
+    current_payload = mod._normalize_guardian_payload(
+        {
+            "task_mode": "reading",
+            "focus_score": 72,
+            "fatigue_risk": 28,
+            "cognitive_load": 58,
+            "behavioral_alignment": 76,
+            "uncertainty_score": 24,
+            "progress_status": "dense comparison checkpoint",
+        },
+        "state_update",
+    )
+    mod._apply_learning_state_update(current_mission, current_payload, current_payload["operation"])
+
+    review = mod._build_learning_state_review(current_mission, store=store)
+    assert_true(review["longitudinal_profile"]["mission_count"] >= 2, "guardian should build a longitudinal profile across missions")
+    assert_true(review["longitudinal_profile"]["sample_count"] >= 3, "longitudinal profile should use stable cross-mission samples")
+    assert_true(review["longitudinal_alignment"]["alignment_band"] in {"aligned", "moderately_shifted", "strongly_shifted"}, "guardian should expose longitudinal alignment")
+    assert_true(review["adaptive_profile"]["source"] in {"longitudinal_profile_calibration", "personal_plus_longitudinal_calibration"}, "guardian should let longitudinal data influence adaptive calibration")
+    assert_true(review["calibration_summary"]["mission_count"] >= 2, "calibration summary should expose cross-mission coverage")
+
+    long_term_reply = mod._build_learning_state_chat_reply("Show me the long-term profile.", current_mission, store=store)
+    history_compare_reply = mod._build_learning_state_chat_reply("Compare this state to my long-term history.", current_mission, store=store)
+    assert_true("long-term" in long_term_reply.lower() or "missions" in long_term_reply.lower(), "long-term chat should mention the longitudinal profile")
+    assert_true("long-term" in history_compare_reply.lower() or "historical norm" in history_compare_reply.lower(), "history compare chat should mention the longitudinal comparison")
+    print("PASS longitudinal_profile")
+
+
 def run_explain_chat_flow(mod):
     mission = mod._build_default_mission("guardian_smoke_explain", "guardian_smoke_explain")
     mission = mod._ensure_mission_extensions(mission)
@@ -365,6 +439,7 @@ def main():
     run_sustained_event_flow(mod)
     run_baseline_and_trend_flow(mod)
     run_adaptive_threshold_flow(mod)
+    run_longitudinal_profile_flow(mod)
     run_explain_chat_flow(mod)
     print("ALL GUARDIAN SMOKE TESTS PASSED")
 

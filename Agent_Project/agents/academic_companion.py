@@ -890,28 +890,90 @@ def _build_guardian_baseline_deviation_summary(latest_state, baseline):
     }
 
 
-def _build_guardian_adaptive_profile(task_mode, baseline):
+def _guardian_blend_baseline_sources(personal_baseline, longitudinal_profile):
+    personal_baseline = personal_baseline if isinstance(personal_baseline, dict) else {}
+    longitudinal_profile = longitudinal_profile if isinstance(longitudinal_profile, dict) else {}
+    personal_count = _safe_int(personal_baseline.get("sample_count"), default=0)
+    longitudinal_count = _safe_int(longitudinal_profile.get("sample_count"), default=0)
+    if personal_count <= 0 and longitudinal_count <= 0:
+        return {}, "task_profile_only", 0.0
+    if personal_count <= 0:
+        blended = copy.deepcopy(longitudinal_profile)
+        blended["sample_count"] = longitudinal_count
+        return blended, "longitudinal_profile_calibration", 1.0
+    if longitudinal_count <= 0:
+        blended = copy.deepcopy(personal_baseline)
+        blended["sample_count"] = personal_count
+        return blended, "personal_baseline_calibration", 0.0
+
+    longitudinal_weight = 0.22 if personal_count >= 4 else 0.32
+    if longitudinal_count >= 8:
+        longitudinal_weight += 0.05
+    longitudinal_weight = round(min(0.42, max(0.18, longitudinal_weight)), 2)
+    personal_weight = round(1.0 - longitudinal_weight, 2)
+    blended = {
+        "task_mode": _normalize_guardian_task_mode(personal_baseline.get("task_mode"))
+        or _normalize_guardian_task_mode(longitudinal_profile.get("task_mode"))
+        or "reading",
+        "sample_count": personal_count,
+        "longitudinal_sample_count": longitudinal_count,
+        "mission_count": _safe_int(longitudinal_profile.get("mission_count"), default=0),
+        "blend_weight": longitudinal_weight,
+    }
+    fields = (
+        "focus_score",
+        "cognitive_load",
+        "behavioral_alignment",
+        "fatigue_risk",
+        "uncertainty_score",
+        "switching_index",
+        "drift_trend",
+        "stability",
+    )
+    for field in fields:
+        personal_value = _safe_float(personal_baseline.get(field), default=None)
+        longitudinal_value = _safe_float(longitudinal_profile.get(field), default=None)
+        if personal_value is None and longitudinal_value is None:
+            continue
+        if personal_value is None:
+            blended[field] = round(longitudinal_value, 1)
+            continue
+        if longitudinal_value is None:
+            blended[field] = round(personal_value, 1)
+            continue
+        blended[field] = round((personal_value * personal_weight) + (longitudinal_value * longitudinal_weight), 1)
+    return blended, "personal_plus_longitudinal_calibration", longitudinal_weight
+
+
+def _build_guardian_adaptive_profile(task_mode, baseline, longitudinal_profile=None):
     task_mode = _normalize_guardian_task_mode(task_mode) or "reading"
     baseline = baseline if isinstance(baseline, dict) else {}
+    longitudinal_profile = longitudinal_profile if isinstance(longitudinal_profile, dict) else {}
     default_profile = copy.deepcopy(_guardian_task_profile(task_mode))
-    sample_count = _safe_int(baseline.get("sample_count"), default=0)
-    if sample_count <= 0:
+    effective_baseline, source, blend_weight = _guardian_blend_baseline_sources(baseline, longitudinal_profile)
+    sample_count = _safe_int(effective_baseline.get("sample_count"), default=0)
+    longitudinal_count = _safe_int(effective_baseline.get("longitudinal_sample_count"), default=0)
+    mission_count = _safe_int(effective_baseline.get("mission_count"), default=0)
+    if sample_count <= 0 and longitudinal_count <= 0:
         return {
             "task_mode": task_mode,
-            "source": "task_profile_only",
+            "source": source,
             "sample_count": 0,
+            "longitudinal_sample_count": 0,
+            "mission_count": 0,
+            "blend_weight": 0.0,
             "thresholds": default_profile,
             "threshold_shift": {},
             "summary": f"The guardian is currently using the default {task_mode} task profile because no personal baseline is available yet.",
         }
 
-    baseline_focus = _safe_float(baseline.get("focus_score"), default=70.0)
-    baseline_load = _safe_float(baseline.get("cognitive_load"), default=default_profile["load_medium"])
-    baseline_alignment = _safe_float(baseline.get("behavioral_alignment"), default=80.0)
-    baseline_fatigue = _safe_float(baseline.get("fatigue_risk"), default=default_profile["fatigue_medium"])
-    baseline_uncertainty = _safe_float(baseline.get("uncertainty_score"), default=default_profile["uncertainty_medium"])
-    baseline_switching = _safe_float(baseline.get("switching_index"), default=default_profile["switching_high"] * 0.55)
-    baseline_drift = _safe_float(baseline.get("drift_trend"), default=default_profile["drift_rising"] * 0.75)
+    baseline_focus = _safe_float(effective_baseline.get("focus_score"), default=70.0)
+    baseline_load = _safe_float(effective_baseline.get("cognitive_load"), default=default_profile["load_medium"])
+    baseline_alignment = _safe_float(effective_baseline.get("behavioral_alignment"), default=80.0)
+    baseline_fatigue = _safe_float(effective_baseline.get("fatigue_risk"), default=default_profile["fatigue_medium"])
+    baseline_uncertainty = _safe_float(effective_baseline.get("uncertainty_score"), default=default_profile["uncertainty_medium"])
+    baseline_switching = _safe_float(effective_baseline.get("switching_index"), default=default_profile["switching_high"] * 0.55)
+    baseline_drift = _safe_float(effective_baseline.get("drift_trend"), default=default_profile["drift_rising"] * 0.75)
 
     calibrated = copy.deepcopy(default_profile)
     calibrated["load_medium"] = round(max(18.0, min(78.0, (default_profile["load_medium"] * 0.5) + (baseline_load * 0.5))), 1)
@@ -935,14 +997,30 @@ def _build_guardian_adaptive_profile(task_mode, baseline):
         if key in default_profile:
             threshold_shift[key] = round(_safe_float(value, default=0.0) - _safe_float(default_profile[key], default=0.0), 1)
 
-    summary = (
-        f"The guardian has calibrated the {task_mode} profile using {sample_count} recent baseline snapshots. "
-        f"Focus guardrail is now {calibrated['focus_guardrail']}/100 and load-high threshold is {calibrated['load_high']}/100."
-    )
+    if source == "longitudinal_profile_calibration":
+        summary = (
+            f"The guardian has calibrated the {task_mode} profile from a cross-mission profile built from "
+            f"{longitudinal_count} stable snapshots across {max(mission_count, 1)} missions. "
+            f"Focus guardrail is now {calibrated['focus_guardrail']}/100 and load-high threshold is {calibrated['load_high']}/100."
+        )
+    elif source == "personal_plus_longitudinal_calibration":
+        summary = (
+            f"The guardian has calibrated the {task_mode} profile using {sample_count} recent baseline snapshots, "
+            f"lightly blended with a cross-mission profile from {max(mission_count, 1)} missions. "
+            f"Focus guardrail is now {calibrated['focus_guardrail']}/100 and load-high threshold is {calibrated['load_high']}/100."
+        )
+    else:
+        summary = (
+            f"The guardian has calibrated the {task_mode} profile using {sample_count} recent baseline snapshots. "
+            f"Focus guardrail is now {calibrated['focus_guardrail']}/100 and load-high threshold is {calibrated['load_high']}/100."
+        )
     return {
         "task_mode": task_mode,
-        "source": "personal_baseline_calibration",
+        "source": source,
         "sample_count": sample_count,
+        "longitudinal_sample_count": longitudinal_count,
+        "mission_count": mission_count,
+        "blend_weight": blend_weight,
         "thresholds": calibrated,
         "threshold_shift": threshold_shift,
         "summary": summary,
@@ -981,6 +1059,9 @@ def _build_guardian_calibration_summary(adaptive_profile, latest_state):
         "task_mode": task_mode,
         "source": _safe_text(adaptive_profile.get("source"), max_length=40),
         "sample_count": _safe_int(adaptive_profile.get("sample_count"), default=0),
+        "longitudinal_sample_count": _safe_int(adaptive_profile.get("longitudinal_sample_count"), default=0),
+        "mission_count": _safe_int(adaptive_profile.get("mission_count"), default=0),
+        "blend_weight": _safe_float(adaptive_profile.get("blend_weight"), default=0.0),
         "applied_thresholds": {
             "focus_guardrail": thresholds.get("focus_guardrail"),
             "focus_recovery": thresholds.get("focus_recovery"),
@@ -996,6 +1077,165 @@ def _build_guardian_calibration_summary(adaptive_profile, latest_state):
         "summary": summary,
         "notes": notes[:4],
     }
+
+
+def _guardian_session_missions(store, session_id, current_mission=None):
+    store = store if isinstance(store, dict) else {}
+    current_mission = current_mission if isinstance(current_mission, dict) else {}
+    safe_session_id = _safe_text(session_id, max_length=120) or _safe_text(current_mission.get("session_id"), max_length=120)
+    if not safe_session_id:
+        return []
+
+    current_mission_id = _safe_text(current_mission.get("mission_id"), max_length=80)
+    missions = []
+    for mission in store.get("missions", []):
+        if not isinstance(mission, dict):
+            continue
+        if _safe_text(mission.get("session_id"), max_length=120) != safe_session_id:
+            continue
+        if current_mission_id and _safe_text(mission.get("mission_id"), max_length=80) == current_mission_id:
+            continue
+        missions.append(_ensure_mission_extensions(copy.deepcopy(mission)))
+    if current_mission and _safe_text(current_mission.get("session_id"), max_length=120) == safe_session_id:
+        missions.append(_ensure_mission_extensions(copy.deepcopy(current_mission)))
+    return missions
+
+
+def _guardian_collect_session_history(missions):
+    history = []
+    mission_ids = []
+    seen_ids = set()
+    for mission in missions or []:
+        if not isinstance(mission, dict):
+            continue
+        mission_id = _safe_text(mission.get("mission_id"), max_length=80)
+        guardian_state = _ensure_payload_dict(mission.get("learning_state_guardian"))
+        mission_history = [copy.deepcopy(item) for item in guardian_state.get("state_history", []) if isinstance(item, dict)]
+        if not mission_history:
+            latest_state = guardian_state.get("latest_state")
+            if isinstance(latest_state, dict) and latest_state:
+                mission_history = [copy.deepcopy(latest_state)]
+        if not mission_history:
+            continue
+        if mission_id and mission_id not in seen_ids:
+            mission_ids.append(mission_id)
+            seen_ids.add(mission_id)
+        history.extend(mission_history)
+    history.sort(key=lambda item: _safe_text(item.get("recorded_at"), max_length=40))
+    return history, mission_ids
+
+
+def _build_guardian_longitudinal_profile(history, task_mode="", mission_ids=None, session_id=""):
+    history = [item for item in (history or []) if isinstance(item, dict)]
+    mission_ids = [item for item in (mission_ids or []) if _safe_text(item, max_length=80)]
+    if not history:
+        return {}
+
+    profile = _build_guardian_personal_baseline(history, task_mode=task_mode)
+    if not profile:
+        return {}
+
+    task_mode_label = _normalize_guardian_task_mode(profile.get("task_mode")) or "reading"
+    sample_count = _safe_int(profile.get("sample_count"), default=0)
+    mission_count = len(mission_ids)
+    summary = (
+        f"Across {max(mission_count, 1)} missions, the guardian has a long-term {task_mode_label} profile built from "
+        f"{sample_count} stable snapshots. Focus norm is {profile.get('focus_score', 'n/a')}/100 and load norm is "
+        f"{profile.get('cognitive_load', 'n/a')}/100."
+    )
+    enriched = copy.deepcopy(profile)
+    enriched["scope"] = "cross_mission"
+    enriched["source"] = f"cross_mission_{profile.get('source', 'stable_samples')}"
+    enriched["session_id"] = _safe_text(session_id, max_length=120)
+    enriched["mission_count"] = mission_count
+    enriched["snapshot_count"] = len(history)
+    enriched["summary"] = summary
+    return enriched
+
+
+def _build_guardian_longitudinal_alignment(latest_state, personal_baseline, longitudinal_profile):
+    latest_state = latest_state if isinstance(latest_state, dict) else {}
+    personal_baseline = personal_baseline if isinstance(personal_baseline, dict) else {}
+    longitudinal_profile = longitudinal_profile if isinstance(longitudinal_profile, dict) else {}
+    if not longitudinal_profile:
+        return {}
+
+    session_delta = _guardian_baseline_delta(personal_baseline, longitudinal_profile) if personal_baseline else {}
+    current_delta = _guardian_baseline_delta(latest_state, longitudinal_profile) if latest_state else {}
+    fields = [
+        ("focus_score", "Focus"),
+        ("cognitive_load", "Cognitive load"),
+        ("behavioral_alignment", "Behavior alignment"),
+        ("fatigue_risk", "Fatigue"),
+        ("uncertainty_score", "Uncertainty"),
+        ("switching_index", "Task switching"),
+        ("drift_trend", "Drift trend"),
+    ]
+
+    def strongest_shift(delta_map):
+        strongest = {}
+        strongest_score = -1.0
+        for field, label in fields:
+            delta = _safe_float(delta_map.get(field), default=0.0)
+            if abs(delta) <= strongest_score:
+                continue
+            strongest_score = abs(delta)
+            strongest = {
+                "field": field,
+                "label": label,
+                "delta": delta,
+            }
+        return strongest
+
+    strongest_session_shift = strongest_shift(session_delta)
+    strongest_state_shift = strongest_shift(current_delta)
+    state_score = abs(_safe_float(strongest_state_shift.get("delta"), default=0.0))
+    session_score = abs(_safe_float(strongest_session_shift.get("delta"), default=0.0))
+    if state_score < 8.0 and session_score < 8.0:
+        alignment_band = "aligned"
+    elif state_score < 18.0 and session_score < 18.0:
+        alignment_band = "moderately_shifted"
+    else:
+        alignment_band = "strongly_shifted"
+
+    summary = "The current mission still looks close to the learner's longer-term guardian profile."
+    if strongest_state_shift:
+        direction = "below" if strongest_state_shift.get("delta", 0.0) < 0 else "above"
+        if strongest_state_shift.get("field") in {"cognitive_load", "fatigue_risk", "uncertainty_score", "switching_index", "drift_trend"}:
+            direction = "above" if strongest_state_shift.get("delta", 0.0) > 0 else "below"
+        summary = (
+            f"Relative to the long-term profile, the strongest current shift is {strongest_state_shift.get('label', 'the latest signal').lower()}, "
+            f"which is {abs(strongest_state_shift.get('delta', 0.0)):.1f} points {direction} the learner's historical norm."
+        )
+
+    return {
+        "alignment_band": alignment_band,
+        "sample_count": _safe_int(longitudinal_profile.get("sample_count"), default=0),
+        "mission_count": _safe_int(longitudinal_profile.get("mission_count"), default=0),
+        "session_baseline_delta": session_delta,
+        "current_state_delta": current_delta,
+        "strongest_session_shift": strongest_session_shift,
+        "strongest_state_shift": strongest_state_shift,
+        "summary": summary,
+    }
+
+
+def _guardian_longitudinal_profile_for_mission(store, mission):
+    mission = mission if isinstance(mission, dict) else {}
+    guardian_state = _ensure_payload_dict(mission.get("learning_state_guardian"))
+    task_mode = (
+        _normalize_guardian_task_mode(guardian_state.get("task_mode"))
+        or _normalize_guardian_task_mode(_ensure_payload_dict(guardian_state.get("latest_state")).get("task_mode"))
+        or "reading"
+    )
+    session_missions = _guardian_session_missions(store, mission.get("session_id"), current_mission=mission)
+    history, mission_ids = _guardian_collect_session_history(session_missions)
+    return _build_guardian_longitudinal_profile(
+        history,
+        task_mode=task_mode,
+        mission_ids=mission_ids,
+        session_id=mission.get("session_id"),
+    )
 
 
 def _build_guardian_recent_trend_window(history, latest_state, baseline=None):
@@ -3592,6 +3832,8 @@ def _default_learning_state_guardian(created_at=""):
         "continuity_profile": {},
         "intervention_plan": {},
         "baseline_deviation_summary": {},
+        "longitudinal_profile": {},
+        "longitudinal_alignment": {},
         "state_streaks": {},
         "trajectory_outlook": {},
         "adaptive_profile": {},
@@ -5259,8 +5501,9 @@ def _build_guardian_trajectory_outlook(history, recent_trend_window, continuity_
     }
 
 
-def _refresh_guardian_derived_state(state):
+def _refresh_guardian_derived_state(state, longitudinal_profile=None):
     state = _ensure_payload_dict(state)
+    longitudinal_profile = longitudinal_profile if isinstance(longitudinal_profile, dict) else {}
     history = [item for item in state.get("state_history", []) if isinstance(item, dict)]
     signals = [item for item in state.get("focus_signals", []) if isinstance(item, dict)]
     latest_state = state.get("latest_state", {}) if isinstance(state.get("latest_state"), dict) else {}
@@ -5274,7 +5517,7 @@ def _refresh_guardian_derived_state(state):
 
     task_mode = _normalize_guardian_task_mode(state.get("task_mode")) or _normalize_guardian_task_mode(latest_state.get("task_mode")) or "reading"
     baseline = _build_guardian_personal_baseline(history, task_mode=task_mode)
-    adaptive_profile = _build_guardian_adaptive_profile(task_mode, baseline)
+    adaptive_profile = _build_guardian_adaptive_profile(task_mode, baseline, longitudinal_profile=longitudinal_profile)
     tracker = state.get("difficulty_tracker") if isinstance(state.get("difficulty_tracker"), dict) else _default_guardian_difficulty_tracker()
     if latest_state:
         latest_state = _finalize_guardian_snapshot(
@@ -5308,6 +5551,7 @@ def _refresh_guardian_derived_state(state):
     )
     state_explanation = _guardian_state_explanation(latest_state, signals, risk_flags)
     baseline_deviation_summary = _build_guardian_baseline_deviation_summary(latest_state, baseline)
+    longitudinal_alignment = _build_guardian_longitudinal_alignment(latest_state, baseline, longitudinal_profile)
     state_streaks = _build_guardian_state_streaks(history)
     trajectory_outlook = _build_guardian_trajectory_outlook(
         history,
@@ -5337,6 +5581,8 @@ def _refresh_guardian_derived_state(state):
     state["state_explanation"] = state_explanation
     state["continuity_profile"] = continuity_profile
     state["baseline_deviation_summary"] = baseline_deviation_summary
+    state["longitudinal_profile"] = longitudinal_profile
+    state["longitudinal_alignment"] = longitudinal_alignment
     state["state_streaks"] = state_streaks
     state["trajectory_outlook"] = trajectory_outlook
     state["adaptive_profile"] = adaptive_profile
@@ -5345,9 +5591,27 @@ def _refresh_guardian_derived_state(state):
     return state
 
 
-def _build_learning_state_review(mission):
+def _attach_guardian_longitudinal_context(mission, store):
+    mission = mission if isinstance(mission, dict) else {}
+    if not mission:
+        return mission
     state = _ensure_payload_dict(mission.get("learning_state_guardian"))
-    state = _refresh_guardian_derived_state(state)
+    longitudinal_profile = _guardian_longitudinal_profile_for_mission(store, mission)
+    mission["learning_state_guardian"] = _refresh_guardian_derived_state(
+        state,
+        longitudinal_profile=longitudinal_profile,
+    )
+    return mission
+
+
+def _build_learning_state_review(mission, store=None):
+    state = _ensure_payload_dict(mission.get("learning_state_guardian"))
+    longitudinal_profile = (
+        _guardian_longitudinal_profile_for_mission(store, mission)
+        if isinstance(store, dict)
+        else _ensure_payload_dict(state.get("longitudinal_profile"))
+    )
+    state = _refresh_guardian_derived_state(state, longitudinal_profile=longitudinal_profile)
     history = [item for item in state.get("state_history", []) if isinstance(item, dict)]
     signals = [item for item in state.get("focus_signals", []) if isinstance(item, dict)]
     latest_state = state.get("latest_state", {}) if isinstance(state.get("latest_state"), dict) else {}
@@ -5387,6 +5651,8 @@ def _build_learning_state_review(mission):
     recovery_confidence = _ensure_payload_dict(state.get("recovery_confidence"))
     continuity_profile = _ensure_payload_dict(state.get("continuity_profile"))
     baseline_deviation_summary = _ensure_payload_dict(state.get("baseline_deviation_summary"))
+    longitudinal_profile = _ensure_payload_dict(state.get("longitudinal_profile"))
+    longitudinal_alignment = _ensure_payload_dict(state.get("longitudinal_alignment"))
     state_streaks = _ensure_payload_dict(state.get("state_streaks"))
     trajectory_outlook = _ensure_payload_dict(state.get("trajectory_outlook"))
     adaptive_profile = _ensure_payload_dict(state.get("adaptive_profile"))
@@ -5483,6 +5749,8 @@ def _build_learning_state_review(mission):
         "recovery_confidence": recovery_confidence,
         "continuity_profile": continuity_profile,
         "baseline_deviation_summary": baseline_deviation_summary,
+        "longitudinal_profile": longitudinal_profile,
+        "longitudinal_alignment": longitudinal_alignment,
         "state_streaks": state_streaks,
         "trajectory_outlook": trajectory_outlook,
         "adaptive_profile": adaptive_profile,
@@ -5581,7 +5849,7 @@ def _build_presentation_live_hud(mission, latest_rehearsal_analysis=None):
     }
 
 
-def _build_review(mission):
+def _build_review(mission, store=None):
     sections = mission.get("script_sections", [])
     state = _presentation_state_payload(mission.get("presentation_state", {}), sections)
     difficulty_events = mission.get("difficulty_events", [])
@@ -5655,7 +5923,7 @@ def _build_review(mission):
         ),
         "qa_prep": _build_qa_prep(mission),
         "reflection_coach": _build_reflection_review(mission),
-        "learning_state_guardian": _build_learning_state_review(mission),
+        "learning_state_guardian": _build_learning_state_review(mission, store=store),
         "coaching_summary": _build_coaching_summary(mission, script_summary, difficulty_events, rehearsal_history),
         "next_actions": _build_next_actions(mission),
         "updated_at": mission.get("updated_at", ""),
@@ -6463,12 +6731,14 @@ def _build_reflection_chat_reply(message, mission):
     return review.get("coach_message", "Capture one honest reflection entry so the coach can turn it into a next action.")
 
 
-def _build_learning_state_chat_reply(message, mission):
-    review = _build_learning_state_review(mission)
+def _build_learning_state_chat_reply(message, mission, store=None):
+    review = _build_learning_state_review(mission, store=store)
     latest = review.get("latest_state", {}) or {}
     active_difficulty_event = _ensure_payload_dict(review.get("difficulty_tracking", {})).get("active_event") or {}
     state_explanation = _ensure_payload_dict(review.get("state_explanation"))
     personal_baseline = _ensure_payload_dict(review.get("personal_baseline"))
+    longitudinal_profile = _ensure_payload_dict(review.get("longitudinal_profile"))
+    longitudinal_alignment = _ensure_payload_dict(review.get("longitudinal_alignment"))
     recent_trend_window = _ensure_payload_dict(review.get("recent_trend_window"))
     recovery_confidence = _ensure_payload_dict(review.get("recovery_confidence"))
     transition_summary = _ensure_payload_dict(review.get("state_transition_summary"))
@@ -6491,6 +6761,14 @@ def _build_learning_state_chat_reply(message, mission):
             )
         return "The current state looks relatively stable, so there is no dominant explanation driver yet."
     if "compare" in lowered or "relative" in lowered:
+        if "long" in lowered or "history" in lowered or "across" in lowered:
+            strongest = _ensure_payload_dict(longitudinal_alignment.get("strongest_state_shift"))
+            if strongest:
+                return (
+                    f"{longitudinal_alignment.get('summary', 'The guardian has a long-term comparison ready.')} "
+                    f"Strongest long-term shift: {strongest.get('label', 'current signal')} "
+                    f"({strongest.get('delta', 0.0):+.1f})."
+                )
         deviation_summary = _ensure_payload_dict(review.get("baseline_deviation_summary"))
         strongest = _ensure_payload_dict(deviation_summary.get("strongest_deviation"))
         if strongest:
@@ -6514,6 +6792,14 @@ def _build_learning_state_chat_reply(message, mission):
             return adaptive_profile.get("summary", "The guardian has an adaptive profile ready.")
         return "The guardian does not yet have enough stable baseline data to calibrate adaptive thresholds."
     if "baseline" in lowered:
+        if "long" in lowered or "history" in lowered or "across" in lowered:
+            if longitudinal_profile:
+                return (
+                    f"{longitudinal_profile.get('summary', 'The guardian has a long-term profile ready.')} "
+                    f"It covers {longitudinal_profile.get('mission_count', 0)} missions and "
+                    f"{longitudinal_profile.get('sample_count', 0)} stable snapshots."
+                )
+            return "The guardian still needs state history across more than one mission before it can describe a long-term profile."
         if personal_baseline:
             return (
                 f"Your recent guardian baseline for {personal_baseline.get('task_mode', 'study')} uses "
@@ -6522,6 +6808,15 @@ def _build_learning_state_chat_reply(message, mission):
                 f"{personal_baseline.get('cognitive_load', 'n/a')}/100."
             )
         return "The guardian does not have enough stable snapshots yet to build a personal baseline."
+    if "long term" in lowered or "long-term" in lowered or "longitudinal" in lowered or "across sessions" in lowered:
+        if longitudinal_profile:
+            alignment_text = ""
+            if longitudinal_alignment:
+                alignment_text = (
+                    f" Current mission alignment: {longitudinal_alignment.get('alignment_band', 'unknown')}."
+                )
+            return f"{longitudinal_profile.get('summary', 'The guardian has a long-term profile ready.')}{alignment_text}"
+        return "The guardian needs multiple missions with state history before it can form a long-term study-state profile."
     if "trend" in lowered:
         signals = _ensure_payload_dict(recent_trend_window.get("signals"))
         focus_trend = _ensure_payload_dict(signals.get("focus_score"))
@@ -6745,11 +7040,11 @@ def _build_chat_reply(message, mission):
     )
 
 
-def _build_capability_chat_reply(message, mission, capability):
+def _build_capability_chat_reply(message, mission, capability, store=None):
     if capability == CAPABILITY_REFLECTION:
         return _build_reflection_chat_reply(message, mission)
     if capability == CAPABILITY_GUARDIAN:
-        return _build_learning_state_chat_reply(message, mission)
+        return _build_learning_state_chat_reply(message, mission, store=store)
     return _build_chat_reply(message, mission)
 
 
@@ -6771,7 +7066,7 @@ async def _handle_text_chat(session_id, payload):
                     "capability": capability,
                 },
             )
-        reply = _build_capability_chat_reply(message, mission, capability)
+        reply = _build_capability_chat_reply(message, mission, capability, store=store)
         _append_limited(
             mission["chat_history"],
             {
@@ -6782,6 +7077,7 @@ async def _handle_text_chat(session_id, payload):
             },
         )
         mission["updated_at"] = recorded_at
+        mission = _attach_guardian_longitudinal_context(mission, store)
         _upsert_mission(store, mission)
         _write_store(store)
         return {
@@ -6795,7 +7091,7 @@ async def _handle_text_chat(session_id, payload):
                 "interface_contract": contract,
                 "reply": reply,
                 "received_message": message,
-                "review": _build_review(mission),
+                "review": _build_review(mission, store=store),
             },
         }
 
@@ -6824,6 +7120,7 @@ async def _handle_state_update(session_id, payload):
                 mission = _resolve_mission(store, session_id, mission_payload, create_if_missing=True)
                 _apply_mission_update(mission, mission_payload)
                 mission["updated_at"] = _now_iso()
+                mission = _attach_guardian_longitudinal_context(mission, store)
                 _upsert_mission(store, mission)
                 _write_store(store)
                 return {
@@ -6838,7 +7135,7 @@ async def _handle_state_update(session_id, payload):
                         "operation": "extract_intake",
                         "result": result,
                         "mission": _mission_payload(mission),
-                        "review": _build_review(mission),
+                        "review": _build_review(mission, store=store),
                     },
                 }
             return {
@@ -6853,7 +7150,7 @@ async def _handle_state_update(session_id, payload):
                     "operation": "extract_intake",
                     "result": result,
                     "mission": _mission_payload(mission),
-                    "review": _build_review(mission),
+                    "review": _build_review(mission, store=store),
                 },
             }
         elif operation == "presentation_control":
@@ -6870,6 +7167,11 @@ async def _handle_state_update(session_id, payload):
             result = _apply_mission_update(mission, payload)
 
         mission["updated_at"] = _now_iso()
+        mission = _attach_guardian_longitudinal_context(mission, store)
+        if capability == CAPABILITY_GUARDIAN and isinstance(result, dict):
+            guardian_state = _ensure_payload_dict(mission.get("learning_state_guardian"))
+            result["longitudinal_profile"] = guardian_state.get("longitudinal_profile", {})
+            result["longitudinal_alignment"] = guardian_state.get("longitudinal_alignment", {})
         _upsert_mission(store, mission)
         _write_store(store)
         return {
@@ -6884,7 +7186,7 @@ async def _handle_state_update(session_id, payload):
                 "operation": result.get("operation", operation),
                 "result": result,
                 "mission": _mission_payload(mission),
-                "review": _build_review(mission),
+                "review": _build_review(mission, store=store),
             },
         }
 
@@ -6930,6 +7232,7 @@ async def _handle_difficulty_event(session_id, payload):
             state["focus_area"] = difficulty_entry["challenge"]
         mission["presentation_state"] = _normalize_presentation_state(mission.get("script_sections", []), existing=state, incoming=state)
         mission["updated_at"] = recorded_at
+        mission = _attach_guardian_longitudinal_context(mission, store)
         _upsert_mission(store, mission)
         _write_store(store)
         return {
@@ -6943,7 +7246,7 @@ async def _handle_difficulty_event(session_id, payload):
                 "interface_contract": contract,
                 "difficulty_event": difficulty_entry,
                 "difficulty_count": len(difficulty_events),
-                "review": _build_review(mission),
+                "review": _build_review(mission, store=store),
             },
         }
 
@@ -6955,7 +7258,8 @@ async def _handle_session_review(session_id, payload):
     async with STORE_LOCK:
         store = _read_store()
         mission = _resolve_mission(store, session_id, payload, create_if_missing=True)
-        review = _build_review(mission)
+        mission = _attach_guardian_longitudinal_context(mission, store)
+        review = _build_review(mission, store=store)
         response = {
             "status": "success",
             "data": {
