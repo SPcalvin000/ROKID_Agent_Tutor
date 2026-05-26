@@ -790,6 +790,82 @@ def _guardian_baseline_delta(latest_state, baseline):
     }
 
 
+def _guardian_deviation_band(delta, higher_is_better=True, mild=8.0, strong=18.0):
+    delta = _safe_float(delta, default=0.0)
+    magnitude = abs(delta)
+    if magnitude < mild:
+        return "near_baseline"
+    if higher_is_better:
+        if delta <= -strong:
+            return "well_below_baseline"
+        if delta < 0:
+            return "below_baseline"
+        if delta >= strong:
+            return "well_above_baseline"
+        return "above_baseline"
+    if delta >= strong:
+        return "well_above_baseline"
+    if delta > 0:
+        return "above_baseline"
+    if delta <= -strong:
+        return "well_below_baseline"
+    return "below_baseline"
+
+
+def _build_guardian_baseline_deviation_summary(latest_state, baseline):
+    latest_state = latest_state if isinstance(latest_state, dict) else {}
+    baseline = baseline if isinstance(baseline, dict) else {}
+    if not latest_state or not baseline:
+        return {}
+
+    deltas = _guardian_baseline_delta(latest_state, baseline)
+    fields = [
+        ("focus_score", "Focus", True),
+        ("cognitive_load", "Cognitive load", False),
+        ("behavioral_alignment", "Behavior alignment", True),
+        ("fatigue_risk", "Fatigue", False),
+        ("uncertainty_score", "Uncertainty", False),
+        ("switching_index", "Task switching", False),
+        ("drift_trend", "Drift trend", False),
+    ]
+    metrics = []
+    strongest = {}
+    strongest_score = -1.0
+
+    for field, label, higher_is_better in fields:
+        delta = _safe_float(deltas.get(field), default=0.0)
+        band = _guardian_deviation_band(delta, higher_is_better=higher_is_better)
+        item = {
+            "field": field,
+            "label": label,
+            "delta": delta,
+            "band": band,
+            "higher_is_better": higher_is_better,
+        }
+        metrics.append(item)
+        if abs(delta) > strongest_score:
+            strongest_score = abs(delta)
+            strongest = item
+
+    summary = "The latest guardian state is still close to the learner's recent baseline."
+    if strongest:
+        direction = "below" if strongest.get("delta", 0.0) < 0 else "above"
+        if strongest.get("field") in {"cognitive_load", "fatigue_risk", "uncertainty_score", "switching_index", "drift_trend"}:
+            direction = "above" if strongest.get("delta", 0.0) > 0 else "below"
+        summary = (
+            f"The strongest baseline deviation is {strongest.get('label', 'the current signal').lower()}, "
+            f"which is {abs(strongest.get('delta', 0.0)):.1f} points {direction} the learner's recent baseline."
+        )
+
+    return {
+        "sample_count": _safe_int(baseline.get("sample_count"), default=0),
+        "task_mode": _safe_text(baseline.get("task_mode"), max_length=40),
+        "metrics": metrics,
+        "strongest_deviation": strongest,
+        "summary": summary,
+    }
+
+
 def _build_guardian_recent_trend_window(history, latest_state, baseline=None):
     history = _guardian_recent_window(history)
     latest_state = latest_state if isinstance(latest_state, dict) else {}
@@ -3355,6 +3431,9 @@ def _default_learning_state_guardian(created_at=""):
         "recovery_confidence": {},
         "continuity_profile": {},
         "intervention_plan": {},
+        "baseline_deviation_summary": {},
+        "state_streaks": {},
+        "trajectory_outlook": {},
         "updated_at": timestamp,
     }
 
@@ -4867,6 +4946,115 @@ def _build_guardian_intervention_plan(
     }
 
 
+def _build_guardian_state_streaks(history):
+    history = [item for item in (history or []) if isinstance(item, dict)]
+    if not history:
+        return {}
+
+    normalized_hints = [_normalize_guardian_state_hint(item.get("state_hint")) or "stable" for item in history]
+    latest_hint = normalized_hints[-1]
+    same_hint_streak = 0
+    for hint in reversed(normalized_hints):
+        if hint == latest_hint:
+            same_hint_streak += 1
+        else:
+            break
+
+    stable_family = {"stable", "productive_struggle"}
+    risk_family = {"off_task_risk", "fatigue_risk", "signal_check", "load_rising"}
+
+    stable_like_streak = 0
+    for hint in reversed(normalized_hints):
+        if hint in stable_family:
+            stable_like_streak += 1
+        else:
+            break
+
+    risk_like_streak = 0
+    for hint in reversed(normalized_hints):
+        if hint in risk_family:
+            risk_like_streak += 1
+        else:
+            break
+
+    productive_struggle_streak = 0
+    for hint in reversed(normalized_hints):
+        if hint == "productive_struggle":
+            productive_struggle_streak += 1
+        else:
+            break
+
+    return {
+        "latest_state_hint": latest_hint,
+        "latest_state_label": _guardian_state_hint_label(latest_hint),
+        "same_hint_streak": same_hint_streak,
+        "stable_like_streak": stable_like_streak,
+        "risk_like_streak": risk_like_streak,
+        "productive_struggle_streak": productive_struggle_streak,
+    }
+
+
+def _build_guardian_trajectory_outlook(history, recent_trend_window, continuity_profile, transition_summary, recovery_confidence, active_event=None):
+    history = [item for item in (history or []) if isinstance(item, dict)]
+    recent_trend_window = recent_trend_window if isinstance(recent_trend_window, dict) else {}
+    continuity_profile = continuity_profile if isinstance(continuity_profile, dict) else {}
+    transition_summary = transition_summary if isinstance(transition_summary, dict) else {}
+    recovery_confidence = recovery_confidence if isinstance(recovery_confidence, dict) else {}
+    active_event = active_event if isinstance(active_event, dict) else {}
+    if not history:
+        return {}
+
+    trend_signals = _ensure_payload_dict(recent_trend_window.get("signals"))
+    focus_trend = _ensure_payload_dict(trend_signals.get("focus_score"))
+    load_trend = _ensure_payload_dict(trend_signals.get("cognitive_load"))
+    fatigue_trend = _ensure_payload_dict(trend_signals.get("fatigue_risk"))
+    stability_band = _safe_text(continuity_profile.get("stability_band"), max_length=20).lower()
+    transition_type = _safe_text(transition_summary.get("transition_type"), max_length=30).lower()
+    recovery_label = _safe_text(recovery_confidence.get("label"), max_length=20).lower()
+
+    label = "stabilizing"
+    confidence = "medium"
+    summary = "The guardian expects the state to stay broadly stable if the current routine holds."
+
+    if active_event:
+        label = "active_risk"
+        confidence = "high"
+        summary = "A sustained guardian event is active, so the short-term outlook is still risk-heavy until that event is addressed."
+    elif transition_type == "recovery" and recovery_label in {"medium", "high"}:
+        label = "recovering"
+        confidence = "medium" if recovery_label == "medium" else "high"
+        summary = "The recent snapshots suggest the state is recovering, but the next block should confirm whether that recovery holds."
+    elif stability_band == "volatile":
+        label = "oscillating"
+        confidence = "high"
+        summary = "The state is oscillating across the recent window, so the next short block is more informative than a longer plan."
+    elif (
+        focus_trend.get("direction") == "worsening"
+        or load_trend.get("direction") == "worsening"
+        or fatigue_trend.get("direction") == "worsening"
+        or transition_type == "worsening"
+    ):
+        label = "deteriorating"
+        confidence = "medium"
+        summary = "The recent trajectory is deteriorating, so the next intervention should reduce friction before another deep block."
+    elif stability_band == "mixed":
+        label = "stabilizing"
+        confidence = "medium"
+        summary = "The state is partly stable but still mixed, so one more clean block is needed before treating it as fully settled."
+    elif stability_band == "stable":
+        label = "stable"
+        confidence = "high"
+        summary = "The state trajectory looks stable enough to keep the current study pattern for the next block."
+
+    return {
+        "label": label,
+        "confidence": confidence,
+        "summary": summary,
+        "transition_type": transition_type,
+        "stability_band": stability_band,
+    }
+
+
 def _refresh_guardian_derived_state(state):
     state = _ensure_payload_dict(state)
     history = [item for item in state.get("state_history", []) if isinstance(item, dict)]
@@ -4902,6 +5090,16 @@ def _refresh_guardian_derived_state(state):
         active_event=active_event,
     )
     state_explanation = _guardian_state_explanation(latest_state, signals, risk_flags)
+    baseline_deviation_summary = _build_guardian_baseline_deviation_summary(latest_state, baseline)
+    state_streaks = _build_guardian_state_streaks(history)
+    trajectory_outlook = _build_guardian_trajectory_outlook(
+        history,
+        trend_window,
+        continuity_profile,
+        transition_summary,
+        recovery_confidence,
+        active_event=active_event,
+    )
     intervention_plan = _build_guardian_intervention_plan(
         latest_state,
         state_explanation,
@@ -4920,6 +5118,9 @@ def _refresh_guardian_derived_state(state):
     state["recovery_confidence"] = recovery_confidence
     state["state_explanation"] = state_explanation
     state["continuity_profile"] = continuity_profile
+    state["baseline_deviation_summary"] = baseline_deviation_summary
+    state["state_streaks"] = state_streaks
+    state["trajectory_outlook"] = trajectory_outlook
     state["intervention_plan"] = intervention_plan
     return state
 
@@ -4965,6 +5166,9 @@ def _build_learning_state_review(mission):
     state_transition_summary = _ensure_payload_dict(state.get("state_transition_summary"))
     recovery_confidence = _ensure_payload_dict(state.get("recovery_confidence"))
     continuity_profile = _ensure_payload_dict(state.get("continuity_profile"))
+    baseline_deviation_summary = _ensure_payload_dict(state.get("baseline_deviation_summary"))
+    state_streaks = _ensure_payload_dict(state.get("state_streaks"))
+    trajectory_outlook = _ensure_payload_dict(state.get("trajectory_outlook"))
     intervention_plan = _ensure_payload_dict(state.get("intervention_plan"))
     recent_hints = [
         _normalize_guardian_state_hint(item.get("state_hint"))
@@ -5056,6 +5260,9 @@ def _build_learning_state_review(mission):
         "state_transition_summary": state_transition_summary,
         "recovery_confidence": recovery_confidence,
         "continuity_profile": continuity_profile,
+        "baseline_deviation_summary": baseline_deviation_summary,
+        "state_streaks": state_streaks,
+        "trajectory_outlook": trajectory_outlook,
         "intervention_plan": intervention_plan,
         "trend_averages": averages,
         "trend_signals": trend_signals,
@@ -5872,6 +6079,9 @@ def _apply_learning_state_update(mission, payload, operation):
             "state_transition_summary": state.get("state_transition_summary", {}),
             "recovery_confidence": state.get("recovery_confidence", {}),
             "continuity_profile": state.get("continuity_profile", {}),
+            "baseline_deviation_summary": state.get("baseline_deviation_summary", {}),
+            "state_streaks": state.get("state_streaks", {}),
+            "trajectory_outlook": state.get("trajectory_outlook", {}),
             "intervention_plan": state.get("intervention_plan", {}),
         }
 
@@ -5905,6 +6115,9 @@ def _apply_learning_state_update(mission, payload, operation):
             "difficulty_event": difficulty_event or {},
             "recovery_confidence": state.get("recovery_confidence", {}),
             "continuity_profile": state.get("continuity_profile", {}),
+            "baseline_deviation_summary": state.get("baseline_deviation_summary", {}),
+            "state_streaks": state.get("state_streaks", {}),
+            "trajectory_outlook": state.get("trajectory_outlook", {}),
             "intervention_plan": state.get("intervention_plan", {}),
         }
 
@@ -6047,6 +6260,16 @@ def _build_learning_state_chat_reply(message, mission):
                 f"{primary_driver.get('explanation', 'it is contributing the most to the current state.')}"
             )
         return "The current state looks relatively stable, so there is no dominant explanation driver yet."
+    if "compare" in lowered or "relative" in lowered:
+        deviation_summary = _ensure_payload_dict(review.get("baseline_deviation_summary"))
+        strongest = _ensure_payload_dict(deviation_summary.get("strongest_deviation"))
+        if strongest:
+            return (
+                f"{deviation_summary.get('summary', 'The guardian has a baseline comparison ready.')} "
+                f"Strongest deviation: {strongest.get('label', 'current signal')} "
+                f"({strongest.get('delta', 0.0):+.1f})."
+            )
+        return "The guardian needs a stronger personal baseline before it can compare the latest state against your usual pattern."
     if "baseline" in lowered:
         if personal_baseline:
             return (
@@ -6092,6 +6315,24 @@ def _build_learning_state_chat_reply(message, mission):
                 f"({continuity_profile.get('stability_band', 'unknown')})."
             )
         return "The guardian needs a few more snapshots before it can describe state stability."
+    if "trajectory" in lowered or "outlook" in lowered or "direction" in lowered:
+        trajectory_outlook = _ensure_payload_dict(review.get("trajectory_outlook"))
+        if trajectory_outlook:
+            return (
+                f"{trajectory_outlook.get('summary', 'The guardian has a trajectory outlook ready.')} "
+                f"Current outlook: {trajectory_outlook.get('label', 'unknown')} "
+                f"with {trajectory_outlook.get('confidence', 'unknown')} confidence."
+            )
+        return "The guardian needs a slightly longer recent window before it can describe the trajectory outlook."
+    if "streak" in lowered:
+        state_streaks = _ensure_payload_dict(review.get("state_streaks"))
+        if state_streaks:
+            return (
+                f"The current state hint streak is {state_streaks.get('same_hint_streak', 0)}, "
+                f"stable-like streak is {state_streaks.get('stable_like_streak', 0)}, "
+                f"and risk-like streak is {state_streaks.get('risk_like_streak', 0)}."
+            )
+        return "The guardian needs more history before it can describe state streaks."
     if "focus" in lowered or "distracted" in lowered:
         if active_difficulty_event:
             return (
