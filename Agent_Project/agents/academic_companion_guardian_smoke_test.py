@@ -264,6 +264,62 @@ def run_baseline_and_trend_flow(mod):
     print("PASS baseline_and_trend")
 
 
+def run_adaptive_threshold_flow(mod):
+    mission = mod._build_default_mission("guardian_smoke_adaptive", "guardian_smoke_adaptive")
+    mission = mod._ensure_mission_extensions(mission)
+
+    context_payload = mod._normalize_guardian_payload(
+        {
+            "current_task": "Read one journal article section",
+            "session_goal": "Finish one dense section with notes",
+            "task_mode": "reading",
+        },
+        "state_update",
+    )
+    mod._apply_learning_state_update(mission, context_payload, context_payload["operation"])
+
+    stable_baseline = [
+        {"attention_score": 84, "fatigue_score": 21, "stress_score": 30, "clarity_score": 82},
+        {"attention_score": 82, "fatigue_score": 24, "stress_score": 32, "clarity_score": 79},
+        {"attention_score": 83, "fatigue_score": 22, "stress_score": 31, "clarity_score": 80},
+        {"attention_score": 85, "fatigue_score": 20, "stress_score": 29, "clarity_score": 83},
+    ]
+    for idx, seed in enumerate(stable_baseline):
+        payload = mod._normalize_guardian_payload(
+            {
+                **seed,
+                "task_mode": "reading",
+                "progress_status": f"adaptive baseline {idx}",
+            },
+            "state_update",
+        )
+        mod._apply_learning_state_update(mission, payload, payload["operation"])
+
+    moderate_load_payload = mod._normalize_guardian_payload(
+        {
+            "task_mode": "reading",
+            "focus_score": 79,
+            "fatigue_risk": 24,
+            "cognitive_load": 54,
+            "behavioral_alignment": 82,
+            "uncertainty_score": 18,
+            "progress_status": "dense paragraph analysis",
+        },
+        "state_update",
+    )
+    state_result = mod._apply_learning_state_update(mission, moderate_load_payload, moderate_load_payload["operation"])
+    review = mod._build_learning_state_review(mission)
+
+    assert_true(review["adaptive_profile"]["thresholds"]["load_high"] < 78.0, "adaptive profile should tighten the load_high threshold from the default reading profile")
+    assert_true(review["latest_state"]["adaptive_profile_applied"] is True, "latest state should record that adaptive thresholds were applied")
+    assert_true(review["state_classification"]["state_hint"] == "off_task_risk", "adaptive thresholds should elevate this snapshot into off_task_risk")
+    assert_true(any("adaptive" in item.lower() for item in review["risk_flags"]), "adaptive profile should contribute adaptive risk flags")
+    calibration_reply = mod._build_learning_state_chat_reply("Show me the adaptive thresholds.", mission)
+    assert_true("focus guardrail" in calibration_reply.lower(), "adaptive threshold chat should mention the calibrated focus guardrail")
+    assert_true(state_result["snapshot"]["cognitive_load"] == 54.0, "adaptive flow should preserve the explicit cognitive_load input")
+    print("PASS adaptive_thresholds")
+
+
 def run_explain_chat_flow(mod):
     mission = mod._build_default_mission("guardian_smoke_explain", "guardian_smoke_explain")
     mission = mod._ensure_mission_extensions(mission)
@@ -308,6 +364,7 @@ def main():
     run_sensor_snapshot_flow(mod)
     run_sustained_event_flow(mod)
     run_baseline_and_trend_flow(mod)
+    run_adaptive_threshold_flow(mod)
     run_explain_chat_flow(mod)
     print("ALL GUARDIAN SMOKE TESTS PASSED")
 

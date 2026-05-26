@@ -522,6 +522,26 @@ def _guardian_task_profile(task_mode):
     return GUARDIAN_TASK_MODE_PROFILES.get(normalized, GUARDIAN_TASK_MODE_PROFILES["reading"])
 
 
+def _guardian_effective_profile(task_mode="", adaptive_profile=None):
+    task_mode = _normalize_guardian_task_mode(task_mode) or "reading"
+    default_profile = copy.deepcopy(_guardian_task_profile(task_mode))
+    adaptive_profile = adaptive_profile if isinstance(adaptive_profile, dict) else {}
+    adaptive_task_mode = _normalize_guardian_task_mode(adaptive_profile.get("task_mode"))
+    thresholds = _ensure_payload_dict(adaptive_profile.get("thresholds"))
+    if adaptive_task_mode and adaptive_task_mode != task_mode:
+        return default_profile
+    if not thresholds:
+        return default_profile
+    for key, value in thresholds.items():
+        if value in (None, ""):
+            continue
+        if key in default_profile:
+            default_profile[key] = _safe_float(value, default=default_profile[key])
+        else:
+            default_profile[key] = _safe_float(value, default=0.0)
+    return default_profile
+
+
 def _normalize_guardian_state_hint(value):
     normalized = _safe_text(value, max_length=80).lower()
     if not normalized:
@@ -534,9 +554,9 @@ def _guardian_state_hint_label(value):
     return GUARDIAN_STATE_HINT_LABELS.get(normalized, normalized.replace("_", " ").title())
 
 
-def _derive_guardian_load_level(cognitive_load, task_mode=""):
+def _derive_guardian_load_level(cognitive_load, task_mode="", adaptive_profile=None):
     score = _safe_score_100(cognitive_load, default=0.0)
-    profile = _guardian_task_profile(task_mode)
+    profile = _guardian_effective_profile(task_mode, adaptive_profile=adaptive_profile)
     if score >= profile["load_high"]:
         return "high"
     if score >= profile["load_medium"]:
@@ -544,9 +564,9 @@ def _derive_guardian_load_level(cognitive_load, task_mode=""):
     return "low"
 
 
-def _derive_guardian_fatigue_level(fatigue_risk, task_mode=""):
+def _derive_guardian_fatigue_level(fatigue_risk, task_mode="", adaptive_profile=None):
     score = _safe_score_100(fatigue_risk, default=0.0)
-    profile = _guardian_task_profile(task_mode)
+    profile = _guardian_effective_profile(task_mode, adaptive_profile=adaptive_profile)
     if score >= profile["fatigue_high"]:
         return "high"
     if score >= profile["fatigue_medium"]:
@@ -554,9 +574,9 @@ def _derive_guardian_fatigue_level(fatigue_risk, task_mode=""):
     return "low"
 
 
-def _derive_guardian_behavioral_level(behavioral_alignment, task_mode=""):
+def _derive_guardian_behavioral_level(behavioral_alignment, task_mode="", adaptive_profile=None):
     score = _safe_score_100(behavioral_alignment, default=100.0)
-    profile = _guardian_task_profile(task_mode)
+    profile = _guardian_effective_profile(task_mode, adaptive_profile=adaptive_profile)
     if score < profile["behavioral_misaligned"]:
         return "misaligned"
     if score < profile["behavioral_drifting"]:
@@ -564,9 +584,9 @@ def _derive_guardian_behavioral_level(behavioral_alignment, task_mode=""):
     return "aligned"
 
 
-def _derive_guardian_confidence_level(uncertainty_score, task_mode=""):
+def _derive_guardian_confidence_level(uncertainty_score, task_mode="", adaptive_profile=None):
     score = _safe_score_100(uncertainty_score, default=35.0)
-    profile = _guardian_task_profile(task_mode)
+    profile = _guardian_effective_profile(task_mode, adaptive_profile=adaptive_profile)
     if score >= profile["uncertainty_high"]:
         return "low"
     if score >= profile["uncertainty_medium"]:
@@ -574,11 +594,11 @@ def _derive_guardian_confidence_level(uncertainty_score, task_mode=""):
     return "high"
 
 
-def _derive_guardian_state_hint(snapshot):
+def _derive_guardian_state_hint(snapshot, adaptive_profile=None):
     if not isinstance(snapshot, dict):
         return "stable"
     task_mode = _normalize_guardian_task_mode(snapshot.get("task_mode")) or "reading"
-    profile = _guardian_task_profile(task_mode)
+    profile = _guardian_effective_profile(task_mode, adaptive_profile=adaptive_profile)
     fatigue_risk = _safe_score_100(snapshot.get("fatigue_risk"), default=0.0)
     uncertainty_score = _safe_score_100(snapshot.get("uncertainty_score"), default=profile["uncertainty_medium"])
     behavioral_alignment = _safe_score_100(snapshot.get("behavioral_alignment"), default=100.0)
@@ -588,6 +608,7 @@ def _derive_guardian_state_hint(snapshot):
     behavioral_level = _safe_text(snapshot.get("behavioral_level"), max_length=40).lower() or _derive_guardian_behavioral_level(
         behavioral_alignment,
         task_mode=task_mode,
+        adaptive_profile=adaptive_profile,
     )
 
     if uncertainty_score >= profile["uncertainty_high"]:
@@ -619,34 +640,37 @@ def _derive_guardian_state_hint(snapshot):
     return "stable"
 
 
-def _derive_guardian_load_reason(snapshot):
+def _derive_guardian_load_reason(snapshot, adaptive_profile=None):
     if not isinstance(snapshot, dict):
         return "Stable learning state"
     task_mode = _normalize_guardian_task_mode(snapshot.get("task_mode")) or "reading"
     fatigue_level = _safe_text(snapshot.get("fatigue_level"), max_length=40).lower() or _derive_guardian_fatigue_level(
         snapshot.get("fatigue_risk"),
         task_mode=task_mode,
+        adaptive_profile=adaptive_profile,
     )
-    uncertainty_score = _safe_score_100(snapshot.get("uncertainty_score"), default=_guardian_task_profile(task_mode)["uncertainty_medium"])
-    state_hint = _safe_text(snapshot.get("state_hint"), max_length=80).lower() or _derive_guardian_state_hint(snapshot)
+    profile = _guardian_effective_profile(task_mode, adaptive_profile=adaptive_profile)
+    uncertainty_score = _safe_score_100(snapshot.get("uncertainty_score"), default=profile["uncertainty_medium"])
+    state_hint = _safe_text(snapshot.get("state_hint"), max_length=80).lower() or _derive_guardian_state_hint(snapshot, adaptive_profile=adaptive_profile)
     cognitive_load = _safe_score_100(snapshot.get("cognitive_load"), default=0.0)
     switching_index = _safe_score_100(snapshot.get("switching_index"), default=0.0)
     behavioral_level = _safe_text(snapshot.get("behavioral_level"), max_length=40).lower() or _derive_guardian_behavioral_level(
         snapshot.get("behavioral_alignment"),
         task_mode=task_mode,
+        adaptive_profile=adaptive_profile,
     )
 
     if fatigue_level == "high":
         return f"Fatigue is becoming the main limiter during this {task_mode} block"
-    if uncertainty_score >= _guardian_task_profile(task_mode)["uncertainty_high"]:
+    if uncertainty_score >= profile["uncertainty_high"]:
         return "Signal warming up or mode transition"
     if state_hint == "productive_struggle":
         return f"Effort is high but still aligned for this {task_mode} block"
-    if switching_index >= _guardian_task_profile(task_mode)["switching_high"]:
+    if switching_index >= profile["switching_high"]:
         return f"Frequent task switching is disrupting {task_mode} flow"
-    if state_hint == "off_task_risk" or cognitive_load >= _guardian_task_profile(task_mode)["load_high"] or behavioral_level == "misaligned":
+    if state_hint == "off_task_risk" or cognitive_load >= profile["load_high"] or behavioral_level == "misaligned":
         return f"Behavior is drifting away from the expected {task_mode} pattern"
-    if cognitive_load >= _guardian_task_profile(task_mode)["load_medium"] or behavioral_level == "drifting":
+    if cognitive_load >= profile["load_medium"] or behavioral_level == "drifting":
         return f"{task_mode.title()} effort is rising and needs tighter regulation"
     return "Stable learning state"
 
@@ -1117,10 +1141,12 @@ def _compute_guardian_drift_trend(snapshot, recent_history):
     return round(max(0.0, min(100.0, trend)), 1)
 
 
-def _finalize_guardian_snapshot(snapshot, recent_history=None, focus_signals=None):
+def _finalize_guardian_snapshot(snapshot, recent_history=None, focus_signals=None, adaptive_profile=None):
     snapshot = copy.deepcopy(_ensure_payload_dict(snapshot))
     snapshot.update(_extract_guardian_sensor_fields(snapshot))
     task_mode = _normalize_guardian_task_mode(snapshot.get("task_mode")) or "reading"
+    profile = _guardian_effective_profile(task_mode, adaptive_profile=adaptive_profile)
+    adaptive_applied = bool(adaptive_profile) and _normalize_guardian_task_mode(_ensure_payload_dict(adaptive_profile).get("task_mode")) == task_mode
     snapshot["task_mode"] = task_mode
     scene_signal_active = _safe_bool(
         snapshot.get("scene_signal_active"),
@@ -1260,21 +1286,29 @@ def _finalize_guardian_snapshot(snapshot, recent_history=None, focus_signals=Non
     if focus_score is not None:
         snapshot["focus_score"] = focus_score
 
-    snapshot["behavioral_level"] = _safe_text(snapshot.get("behavioral_level"), max_length=40).lower() or _derive_guardian_behavioral_level(
+    existing_behavioral_level = "" if adaptive_applied else _safe_text(snapshot.get("behavioral_level"), max_length=40).lower()
+    snapshot["behavioral_level"] = existing_behavioral_level or _derive_guardian_behavioral_level(
         snapshot.get("behavioral_alignment"),
         task_mode=task_mode,
+        adaptive_profile=adaptive_profile,
     )
-    snapshot["fatigue_level"] = _safe_text(snapshot.get("fatigue_level"), max_length=40).lower() or _derive_guardian_fatigue_level(
+    existing_fatigue_level = "" if adaptive_applied else _safe_text(snapshot.get("fatigue_level"), max_length=40).lower()
+    snapshot["fatigue_level"] = existing_fatigue_level or _derive_guardian_fatigue_level(
         snapshot.get("fatigue_risk"),
         task_mode=task_mode,
+        adaptive_profile=adaptive_profile,
     )
-    snapshot["confidence_level"] = _safe_text(snapshot.get("confidence_level"), max_length=40).lower() or _derive_guardian_confidence_level(
+    existing_confidence_level = "" if adaptive_applied else _safe_text(snapshot.get("confidence_level"), max_length=40).lower()
+    snapshot["confidence_level"] = existing_confidence_level or _derive_guardian_confidence_level(
         snapshot.get("uncertainty_score"),
         task_mode=task_mode,
+        adaptive_profile=adaptive_profile,
     )
-    snapshot["load_level"] = _safe_text(snapshot.get("load_level"), max_length=40).lower() or _derive_guardian_load_level(
+    existing_load_level = "" if adaptive_applied else _safe_text(snapshot.get("load_level"), max_length=40).lower()
+    snapshot["load_level"] = existing_load_level or _derive_guardian_load_level(
         snapshot.get("cognitive_load"),
         task_mode=task_mode,
+        adaptive_profile=adaptive_profile,
     )
     snapshot["switching_index"] = _safe_score_100(
         snapshot.get("switching_index"),
@@ -1284,8 +1318,26 @@ def _finalize_guardian_snapshot(snapshot, recent_history=None, focus_signals=Non
         snapshot.get("drift_trend"),
         default=_compute_guardian_drift_trend(snapshot, recent_history),
     )
-    snapshot["state_hint"] = _normalize_guardian_state_hint(snapshot.get("state_hint")) or _derive_guardian_state_hint(snapshot)
-    snapshot["load_reason"] = _safe_text(snapshot.get("load_reason"), max_length=220) or _derive_guardian_load_reason(snapshot)
+    existing_state_hint = "" if adaptive_applied else _normalize_guardian_state_hint(snapshot.get("state_hint"))
+    existing_load_reason = "" if adaptive_applied else _safe_text(snapshot.get("load_reason"), max_length=220)
+    snapshot["state_hint"] = existing_state_hint or _derive_guardian_state_hint(snapshot, adaptive_profile=adaptive_profile)
+    snapshot["load_reason"] = existing_load_reason or _derive_guardian_load_reason(snapshot, adaptive_profile=adaptive_profile)
+    snapshot["adaptive_profile_applied"] = adaptive_applied
+    if snapshot["adaptive_profile_applied"]:
+        snapshot["adaptive_thresholds"] = {
+            "load_medium": profile.get("load_medium"),
+            "load_high": profile.get("load_high"),
+            "fatigue_medium": profile.get("fatigue_medium"),
+            "fatigue_high": profile.get("fatigue_high"),
+            "uncertainty_medium": profile.get("uncertainty_medium"),
+            "uncertainty_high": profile.get("uncertainty_high"),
+            "behavioral_drifting": profile.get("behavioral_drifting"),
+            "behavioral_misaligned": profile.get("behavioral_misaligned"),
+            "switching_high": profile.get("switching_high"),
+            "drift_rising": profile.get("drift_rising"),
+            "focus_guardrail": profile.get("focus_guardrail"),
+            "focus_recovery": profile.get("focus_recovery"),
+        }
     return snapshot
 
 
@@ -4465,6 +4517,48 @@ def _guardian_risk_flags_from_state(latest_state, focus_signals):
     return deduped[:5]
 
 
+def _guardian_risk_flags_from_state_with_profile(latest_state, focus_signals, adaptive_profile=None):
+    latest_state = latest_state if isinstance(latest_state, dict) else {}
+    if not latest_state:
+        return []
+
+    risk_flags = _guardian_risk_flags_from_state(latest_state, focus_signals)
+    adaptive_profile = adaptive_profile if isinstance(adaptive_profile, dict) else {}
+    if not adaptive_profile:
+        return risk_flags
+
+    profile = _guardian_effective_profile(latest_state.get("task_mode"), adaptive_profile=adaptive_profile)
+    focus_score = _optional_score_100(latest_state.get("focus_score"))
+    cognitive_load = _optional_score_100(latest_state.get("cognitive_load"))
+    fatigue_risk = _optional_score_100(latest_state.get("fatigue_risk"))
+    uncertainty_score = _optional_score_100(latest_state.get("uncertainty_score"))
+    switching_index = _optional_score_100(latest_state.get("switching_index"))
+    drift_trend = _optional_score_100(latest_state.get("drift_trend"))
+
+    adaptive_flags = list(risk_flags)
+    if focus_score is not None and focus_score < _safe_float(profile.get("focus_guardrail"), default=0.0):
+        adaptive_flags.append("Focus is below the adaptive guardrail")
+    if cognitive_load is not None and cognitive_load >= _safe_float(profile.get("load_high"), default=100.0):
+        adaptive_flags.append("Load exceeds the adaptive high-load threshold")
+    elif cognitive_load is not None and cognitive_load >= _safe_float(profile.get("load_medium"), default=100.0):
+        adaptive_flags.append("Load is above the adaptive mid-load threshold")
+    if fatigue_risk is not None and fatigue_risk >= _safe_float(profile.get("fatigue_high"), default=100.0):
+        adaptive_flags.append("Fatigue exceeds the adaptive high-fatigue threshold")
+    if uncertainty_score is not None and uncertainty_score >= _safe_float(profile.get("uncertainty_high"), default=100.0):
+        adaptive_flags.append("Signal uncertainty exceeds the adaptive threshold")
+    if switching_index is not None and switching_index >= _safe_float(profile.get("switching_high"), default=100.0):
+        adaptive_flags.append("Task switching exceeds the adaptive threshold")
+    if drift_trend is not None and drift_trend >= _safe_float(profile.get("drift_rising"), default=100.0):
+        adaptive_flags.append("Drift exceeds the adaptive threshold")
+
+    deduped = []
+    for item in adaptive_flags:
+        cleaned = _safe_text(item, max_length=220)
+        if cleaned and cleaned not in deduped:
+            deduped.append(cleaned)
+    return deduped[:6]
+
+
 def _guardian_state_explanation(latest_state, focus_signals, risk_flags):
     latest_state = latest_state if isinstance(latest_state, dict) else {}
     focus_signals = focus_signals if isinstance(focus_signals, list) else []
@@ -5181,8 +5275,20 @@ def _refresh_guardian_derived_state(state):
     task_mode = _normalize_guardian_task_mode(state.get("task_mode")) or _normalize_guardian_task_mode(latest_state.get("task_mode")) or "reading"
     baseline = _build_guardian_personal_baseline(history, task_mode=task_mode)
     adaptive_profile = _build_guardian_adaptive_profile(task_mode, baseline)
-    risk_flags = state.get("risk_flags", []) or _guardian_risk_flags_from_state(latest_state, signals)
     tracker = state.get("difficulty_tracker") if isinstance(state.get("difficulty_tracker"), dict) else _default_guardian_difficulty_tracker()
+    if latest_state:
+        latest_state = _finalize_guardian_snapshot(
+            latest_state,
+            recent_history=history[:-1] if history else [],
+            focus_signals=signals,
+            adaptive_profile=adaptive_profile,
+        )
+        state["latest_state"] = latest_state
+        if history:
+            history[-1] = copy.deepcopy(latest_state)
+            state["state_history"] = history
+
+    risk_flags = _guardian_risk_flags_from_state_with_profile(latest_state, signals, adaptive_profile=adaptive_profile)
     trend_window = _build_guardian_recent_trend_window(history, latest_state, baseline)
     transition_summary = _build_guardian_state_transition_summary(history, latest_state, tracker=tracker)
     recovery_confidence = _build_guardian_recovery_confidence(
