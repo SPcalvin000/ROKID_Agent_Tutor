@@ -50,6 +50,7 @@ def run_high_level_snapshot_flow(mod):
     assert_true(state_result["snapshot"]["focus_score"] == 76.0, "high-level flow should preserve focus_score")
     assert_true(review["task_mode"] == "reading", "review task_mode should stay reading")
     assert_true(review["core_metrics"]["focus_score"] == 76.0, "review focus_score should match")
+    assert_true("recent_trend_window" in review, "review should expose recent_trend_window")
     print("PASS high_level_snapshot")
 
 
@@ -94,6 +95,7 @@ def run_sensor_snapshot_flow(mod):
     assert_true(review["core_metrics"]["switching_index"] > 0, "sensor flow should derive switching_index")
     assert_true(review["core_metrics"]["drift_trend"] > 0, "sensor flow should derive drift_trend")
     assert_true(review["state_explanation"]["primary_driver"], "sensor flow should produce explanation drivers")
+    assert_true(review["state_transition_summary"]["to_state_hint"], "sensor flow should expose a state transition summary")
     print("PASS sensor_snapshot")
 
 
@@ -163,7 +165,83 @@ def run_sustained_event_flow(mod):
     assert_true(resolved_event.get("status") == "resolved", "stable recovery should resolve event")
     assert_true(review["difficulty_tracking"]["event_count"] >= 1, "review should keep resolved guardian events")
     assert_true(review["difficulty_tracking"]["recent_events"], "review should expose recent guardian events")
+    assert_true(review["recovery_confidence"]["label"] in {"medium", "high"}, "resolved recovery should raise recovery confidence")
     print("PASS sustained_event")
+
+
+def run_baseline_and_trend_flow(mod):
+    mission = mod._build_default_mission("guardian_smoke_baseline", "guardian_smoke_baseline")
+    mission = mod._ensure_mission_extensions(mission)
+
+    context_payload = mod._normalize_guardian_payload(
+        {
+            "current_task": "Read and annotate one journal section",
+            "session_goal": "Finish one annotated section",
+            "task_mode": "reading",
+        },
+        "state_update",
+    )
+    mod._apply_learning_state_update(mission, context_payload, context_payload["operation"])
+
+    stable_snapshots = [
+        {"attention_score": 81, "fatigue_score": 24, "stress_score": 33, "clarity_score": 78},
+        {"attention_score": 79, "fatigue_score": 27, "stress_score": 36, "clarity_score": 75},
+        {"attention_score": 83, "fatigue_score": 23, "stress_score": 31, "clarity_score": 80},
+        {"attention_score": 80, "fatigue_score": 25, "stress_score": 34, "clarity_score": 77},
+    ]
+    for idx, payload_seed in enumerate(stable_snapshots):
+        payload = mod._normalize_guardian_payload(
+            {
+                **payload_seed,
+                "task_mode": "reading",
+                "progress_status": f"baseline {idx}",
+            },
+            "state_update",
+        )
+        mod._apply_learning_state_update(mission, payload, payload["operation"])
+
+    strain_payload = mod._normalize_guardian_payload(
+        {
+            "task_mode": "reading",
+            "focus_score": 48,
+            "fatigue_risk": 61,
+            "stress_score": 67,
+            "clarity_score": 43,
+            "behavioral_alignment": 57,
+            "progress_status": "strain checkpoint",
+            "support_needed": "Need to re-anchor main argument",
+        },
+        "state_update",
+    )
+    mod._apply_learning_state_update(mission, strain_payload, strain_payload["operation"])
+
+    recovery_payload = mod._normalize_guardian_payload(
+        {
+            "task_mode": "reading",
+            "focus_score": 82,
+            "fatigue_risk": 26,
+            "stress_score": 32,
+            "clarity_score": 79,
+            "behavioral_alignment": 84,
+            "progress_status": "recovered checkpoint",
+        },
+        "state_update",
+    )
+    mod._apply_learning_state_update(mission, recovery_payload, recovery_payload["operation"])
+    review = mod._build_learning_state_review(mission)
+
+    assert_true(review["personal_baseline"]["sample_count"] >= 3, "guardian should build a personal baseline from stable snapshots")
+    assert_true(review["recent_trend_window"]["window_size"] >= 5, "guardian should expose a recent trend window")
+    assert_true(review["state_transition_summary"]["transition_type"] in {"recovery", "steady", "mixed_shift"}, "guardian should summarize the latest transition")
+    assert_true(review["recovery_confidence"]["score"] > 40, "guardian should expose recovery confidence after recovery snapshots")
+
+    baseline_reply = mod._build_learning_state_chat_reply("What is my baseline?", mission)
+    trend_reply = mod._build_learning_state_chat_reply("Show me the trend.", mission)
+    recovery_reply = mod._build_learning_state_chat_reply("Has my state recovered?", mission)
+    assert_true("baseline" in baseline_reply.lower(), "baseline chat should reference the guardian baseline")
+    assert_true("recent trend window" in trend_reply.lower(), "trend chat should reference the trend window")
+    assert_true("recovery confidence" in recovery_reply.lower(), "recovery chat should mention recovery confidence")
+    print("PASS baseline_and_trend")
 
 
 def run_explain_chat_flow(mod):
@@ -209,6 +287,7 @@ def main():
     run_high_level_snapshot_flow(mod)
     run_sensor_snapshot_flow(mod)
     run_sustained_event_flow(mod)
+    run_baseline_and_trend_flow(mod)
     run_explain_chat_flow(mod)
     print("ALL GUARDIAN SMOKE TESTS PASSED")
 

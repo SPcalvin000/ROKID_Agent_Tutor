@@ -236,6 +236,9 @@ GUARDIAN_DIFFICULTY_TRIGGER_COUNTS = {
     "high": 2,
     "resolve": 2,
 }
+
+GUARDIAN_TREND_WINDOW_SIZE = 6
+GUARDIAN_BASELINE_WINDOW_SIZE = 8
 OPERATION_ALIASES = {
     CAPABILITY_PRESENTATION: {
         "brief": "extract_intake",
@@ -692,6 +695,135 @@ def _guardian_metric_trend(items, field, higher_is_better=True, threshold=6.0):
     if higher_is_better:
         return {"direction": "improving" if delta > 0 else "worsening", "delta": delta}
     return {"direction": "improving" if delta < 0 else "worsening", "delta": delta}
+
+
+def _guardian_recent_window(history, size=GUARDIAN_TREND_WINDOW_SIZE):
+    history = [item for item in (history or []) if isinstance(item, dict)]
+    return history[-max(1, size) :]
+
+
+def _guardian_is_baseline_candidate(snapshot, task_mode=""):
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    if not snapshot:
+        return False
+    normalized_task_mode = _normalize_guardian_task_mode(task_mode)
+    snapshot_mode = _normalize_guardian_task_mode(snapshot.get("task_mode"))
+    if normalized_task_mode and snapshot_mode and normalized_task_mode != snapshot_mode:
+        return False
+
+    state_hint = _normalize_guardian_state_hint(snapshot.get("state_hint")) or "stable"
+    if state_hint in {"off_task_risk", "fatigue_risk"}:
+        return False
+
+    cognitive_load = _safe_score_100(snapshot.get("cognitive_load"), default=100.0)
+    fatigue_risk = _safe_score_100(snapshot.get("fatigue_risk"), default=100.0)
+    behavioral_alignment = _safe_score_100(snapshot.get("behavioral_alignment"), default=0.0)
+    uncertainty_score = _safe_score_100(snapshot.get("uncertainty_score"), default=100.0)
+    switching_index = _safe_score_100(snapshot.get("switching_index"), default=100.0)
+    drift_trend = _safe_score_100(snapshot.get("drift_trend"), default=100.0)
+
+    return (
+        cognitive_load <= 68.0
+        and fatigue_risk <= 66.0
+        and behavioral_alignment >= 58.0
+        and uncertainty_score <= 72.0
+        and switching_index <= 72.0
+        and drift_trend <= 76.0
+    )
+
+
+def _build_guardian_personal_baseline(history, task_mode=""):
+    history = [item for item in (history or []) if isinstance(item, dict)]
+    if not history:
+        return {}
+
+    normalized_task_mode = _normalize_guardian_task_mode(task_mode) or _normalize_guardian_task_mode(history[-1].get("task_mode")) or "reading"
+    candidate_pool = [item for item in history if _guardian_is_baseline_candidate(item, task_mode=normalized_task_mode)]
+    source = "stable_samples"
+
+    if len(candidate_pool) < 3:
+        source = "recent_window"
+        task_mode_history = [
+            item
+            for item in history
+            if _normalize_guardian_task_mode(item.get("task_mode")) == normalized_task_mode
+        ]
+        candidate_pool = task_mode_history[-GUARDIAN_BASELINE_WINDOW_SIZE:]
+        if len(candidate_pool) < 3:
+            candidate_pool = history[-GUARDIAN_BASELINE_WINDOW_SIZE:]
+
+    candidate_pool = candidate_pool[-GUARDIAN_BASELINE_WINDOW_SIZE:]
+    if not candidate_pool:
+        return {}
+
+    return {
+        "task_mode": normalized_task_mode,
+        "source": source,
+        "sample_count": len(candidate_pool),
+        "window_size": min(len(history), GUARDIAN_BASELINE_WINDOW_SIZE),
+        "focus_score": _guardian_numeric_average(candidate_pool, "focus_score"),
+        "cognitive_load": _guardian_numeric_average(candidate_pool, "cognitive_load"),
+        "behavioral_alignment": _guardian_numeric_average(candidate_pool, "behavioral_alignment"),
+        "fatigue_risk": _guardian_numeric_average(candidate_pool, "fatigue_risk"),
+        "uncertainty_score": _guardian_numeric_average(candidate_pool, "uncertainty_score"),
+        "switching_index": _guardian_numeric_average(candidate_pool, "switching_index"),
+        "drift_trend": _guardian_numeric_average(candidate_pool, "drift_trend"),
+        "stability": _guardian_numeric_average(candidate_pool, "stability"),
+        "updated_at": _safe_text(candidate_pool[-1].get("recorded_at"), max_length=40),
+    }
+
+
+def _guardian_baseline_delta(latest_state, baseline):
+    latest_state = latest_state if isinstance(latest_state, dict) else {}
+    baseline = baseline if isinstance(baseline, dict) else {}
+    if not latest_state or not baseline:
+        return {}
+
+    return {
+        "focus_score": round(_safe_float(latest_state.get("focus_score"), default=0.0) - _safe_float(baseline.get("focus_score"), default=0.0), 1),
+        "cognitive_load": round(_safe_float(latest_state.get("cognitive_load"), default=0.0) - _safe_float(baseline.get("cognitive_load"), default=0.0), 1),
+        "behavioral_alignment": round(_safe_float(latest_state.get("behavioral_alignment"), default=0.0) - _safe_float(baseline.get("behavioral_alignment"), default=0.0), 1),
+        "fatigue_risk": round(_safe_float(latest_state.get("fatigue_risk"), default=0.0) - _safe_float(baseline.get("fatigue_risk"), default=0.0), 1),
+        "uncertainty_score": round(_safe_float(latest_state.get("uncertainty_score"), default=0.0) - _safe_float(baseline.get("uncertainty_score"), default=0.0), 1),
+        "switching_index": round(_safe_float(latest_state.get("switching_index"), default=0.0) - _safe_float(baseline.get("switching_index"), default=0.0), 1),
+        "drift_trend": round(_safe_float(latest_state.get("drift_trend"), default=0.0) - _safe_float(baseline.get("drift_trend"), default=0.0), 1),
+    }
+
+
+def _build_guardian_recent_trend_window(history, latest_state, baseline=None):
+    history = _guardian_recent_window(history)
+    latest_state = latest_state if isinstance(latest_state, dict) else {}
+    if not history and latest_state:
+        history = [latest_state]
+    if not history:
+        return {}
+
+    current_task_mode = _normalize_guardian_task_mode(latest_state.get("task_mode")) or _normalize_guardian_task_mode(history[-1].get("task_mode")) or "reading"
+    return {
+        "task_mode": current_task_mode,
+        "window_size": len(history),
+        "from_timestamp": _safe_text(history[0].get("recorded_at"), max_length=40),
+        "to_timestamp": _safe_text(history[-1].get("recorded_at"), max_length=40),
+        "averages": {
+            "focus_score": _guardian_numeric_average(history, "focus_score"),
+            "cognitive_load": _guardian_numeric_average(history, "cognitive_load"),
+            "behavioral_alignment": _guardian_numeric_average(history, "behavioral_alignment"),
+            "fatigue_risk": _guardian_numeric_average(history, "fatigue_risk"),
+            "uncertainty_score": _guardian_numeric_average(history, "uncertainty_score"),
+            "switching_index": _guardian_numeric_average(history, "switching_index"),
+            "drift_trend": _guardian_numeric_average(history, "drift_trend"),
+        },
+        "signals": {
+            "focus_score": _guardian_metric_trend(history, "focus_score", higher_is_better=True, threshold=6.0),
+            "cognitive_load": _guardian_metric_trend(history, "cognitive_load", higher_is_better=False, threshold=6.0),
+            "behavioral_alignment": _guardian_metric_trend(history, "behavioral_alignment", higher_is_better=True, threshold=6.0),
+            "fatigue_risk": _guardian_metric_trend(history, "fatigue_risk", higher_is_better=False, threshold=6.0),
+            "uncertainty_score": _guardian_metric_trend(history, "uncertainty_score", higher_is_better=False, threshold=6.0),
+            "switching_index": _guardian_metric_trend(history, "switching_index", higher_is_better=False, threshold=6.0),
+            "drift_trend": _guardian_metric_trend(history, "drift_trend", higher_is_better=False, threshold=6.0),
+        },
+        "vs_baseline": _guardian_baseline_delta(latest_state, baseline),
+    }
 
 
 def _extract_guardian_sensor_fields(payload):
@@ -3217,6 +3349,10 @@ def _default_learning_state_guardian(created_at=""):
         "difficulty_events": [],
         "difficulty_tracker": _default_guardian_difficulty_tracker(),
         "risk_flags": [],
+        "personal_baseline": {},
+        "recent_trend_window": {},
+        "state_transition_summary": {},
+        "recovery_confidence": {},
         "updated_at": timestamp,
     }
 
@@ -4366,21 +4502,233 @@ def _guardian_state_explanation(latest_state, focus_signals, risk_flags):
     }
 
 
-def _build_learning_state_review(mission):
-    state = _ensure_payload_dict(mission.get("learning_state_guardian"))
+def _guardian_transition_type(previous_hint, current_hint, previous_task_mode="", current_task_mode=""):
+    previous_hint = _normalize_guardian_state_hint(previous_hint)
+    current_hint = _normalize_guardian_state_hint(current_hint)
+    previous_task_mode = _normalize_guardian_task_mode(previous_task_mode)
+    current_task_mode = _normalize_guardian_task_mode(current_task_mode)
+
+    if previous_task_mode and current_task_mode and previous_task_mode != current_task_mode:
+        return "mode_shift"
+    if not previous_hint:
+        return "initial"
+    if previous_hint == current_hint:
+        return "steady"
+
+    stable_family = {"stable", "productive_struggle"}
+    risk_family = {"off_task_risk", "fatigue_risk", "signal_check", "load_rising"}
+
+    if previous_hint in risk_family and current_hint in stable_family:
+        return "recovery"
+    if previous_hint in stable_family and current_hint in risk_family:
+        return "worsening"
+    if previous_hint == "productive_struggle" and current_hint == "stable":
+        return "stabilized"
+    if previous_hint == "stable" and current_hint == "productive_struggle":
+        return "effort_rising"
+    return "mixed_shift"
+
+
+def _build_guardian_state_transition_summary(history, latest_state, tracker=None):
+    history = [item for item in (history or []) if isinstance(item, dict)]
+    latest_state = latest_state if isinstance(latest_state, dict) else {}
+    tracker = tracker if isinstance(tracker, dict) else {}
+    if not latest_state:
+        return {}
+
+    previous_state = history[-2] if len(history) >= 2 else {}
+    previous_hint = _normalize_guardian_state_hint(previous_state.get("state_hint"))
+    current_hint = _normalize_guardian_state_hint(latest_state.get("state_hint")) or "stable"
+    previous_task_mode = _normalize_guardian_task_mode(previous_state.get("task_mode"))
+    current_task_mode = _normalize_guardian_task_mode(latest_state.get("task_mode")) or "reading"
+    transition_type = _guardian_transition_type(previous_hint, current_hint, previous_task_mode, current_task_mode)
+
+    focus_delta = round(_safe_float(latest_state.get("focus_score"), default=0.0) - _safe_float(previous_state.get("focus_score"), default=0.0), 1)
+    load_delta = round(_safe_float(latest_state.get("cognitive_load"), default=0.0) - _safe_float(previous_state.get("cognitive_load"), default=0.0), 1)
+    fatigue_delta = round(_safe_float(latest_state.get("fatigue_risk"), default=0.0) - _safe_float(previous_state.get("fatigue_risk"), default=0.0), 1)
+    alignment_delta = round(
+        _safe_float(latest_state.get("behavioral_alignment"), default=0.0) - _safe_float(previous_state.get("behavioral_alignment"), default=0.0),
+        1,
+    )
+
+    if transition_type == "initial":
+        summary = "This is the first guardian snapshot, so there is no earlier state transition to compare yet."
+    elif transition_type == "mode_shift":
+        summary = f"The guardian shifted from {previous_task_mode or 'the previous mode'} into {current_task_mode}, so thresholds and expectations also changed."
+    elif transition_type == "recovery":
+        summary = (
+            f"The state moved from {_guardian_state_hint_label(previous_hint).lower()} to "
+            f"{_guardian_state_hint_label(current_hint).lower()}, with focus {focus_delta:+.1f} and load {load_delta:+.1f}."
+        )
+    elif transition_type == "worsening":
+        summary = (
+            f"The state moved from {_guardian_state_hint_label(previous_hint).lower()} to "
+            f"{_guardian_state_hint_label(current_hint).lower()}, with focus {focus_delta:+.1f} and load {load_delta:+.1f}."
+        )
+    elif transition_type == "steady":
+        summary = (
+            f"The guardian kept the state in {_guardian_state_hint_label(current_hint).lower()}, "
+            f"with focus {focus_delta:+.1f} and load {load_delta:+.1f} across the latest window."
+        )
+    else:
+        summary = (
+            f"The state shifted from {_guardian_state_hint_label(previous_hint).lower()} to "
+            f"{_guardian_state_hint_label(current_hint).lower()}, with focus {focus_delta:+.1f} and load {load_delta:+.1f}."
+        )
+
+    active_event = tracker.get("active_event") if isinstance(tracker.get("active_event"), dict) else {}
+    return {
+        "transition_type": transition_type,
+        "from_state_hint": previous_hint or "",
+        "from_state_label": _guardian_state_hint_label(previous_hint) if previous_hint else "",
+        "to_state_hint": current_hint,
+        "to_state_label": _guardian_state_hint_label(current_hint),
+        "focus_delta": focus_delta,
+        "load_delta": load_delta,
+        "fatigue_delta": fatigue_delta,
+        "behavioral_alignment_delta": alignment_delta,
+        "active_event_present": bool(active_event),
+        "summary": summary,
+    }
+
+
+def _build_guardian_recovery_confidence(latest_state, baseline, tracker, risk_flags, transition_summary=None):
+    latest_state = latest_state if isinstance(latest_state, dict) else {}
+    baseline = baseline if isinstance(baseline, dict) else {}
+    tracker = tracker if isinstance(tracker, dict) else {}
+    risk_flags = risk_flags if isinstance(risk_flags, list) else []
+    transition_summary = transition_summary if isinstance(transition_summary, dict) else {}
+
+    active_event = tracker.get("active_event") if isinstance(tracker.get("active_event"), dict) else {}
+    stable_count = _safe_int(tracker.get("stable_count"), default=0)
+    sample_count = _safe_int(baseline.get("sample_count"), default=0)
+
+    if not latest_state:
+        return {}
+
+    baseline_delta = _guardian_baseline_delta(latest_state, baseline)
+    if active_event:
+        score = 18.0
+        if transition_summary.get("transition_type") == "recovery":
+            score += 6.0
+        score = max(0.0, min(100.0, score))
+        label = "low"
+        summary = (
+            f"Recovery confidence is low because a guardian event is still active: "
+            f"{_safe_text(active_event.get('primary_label'), max_length=120) or 'study-state difficulty'}."
+        )
+        return {
+            "score": round(score, 1),
+            "label": label,
+            "stable_count": stable_count,
+            "baseline_sample_count": sample_count,
+            "baseline_delta": baseline_delta,
+            "summary": summary,
+        }
+
+    closeness_penalty = 0.0
+    if baseline_delta:
+        closeness_penalty += abs(_safe_float(baseline_delta.get("focus_score"), default=0.0)) * 0.36
+        closeness_penalty += max(0.0, _safe_float(baseline_delta.get("cognitive_load"), default=0.0)) * 0.34
+        closeness_penalty += max(0.0, -_safe_float(baseline_delta.get("behavioral_alignment"), default=0.0)) * 0.20
+        closeness_penalty += max(0.0, _safe_float(baseline_delta.get("fatigue_risk"), default=0.0)) * 0.16
+        closeness_penalty += max(0.0, _safe_float(baseline_delta.get("uncertainty_score"), default=0.0)) * 0.10
+
+    score = 76.0
+    score -= min(48.0, closeness_penalty)
+    score += min(12.0, stable_count * 5.0)
+    score -= min(18.0, len(risk_flags) * 4.0)
+
+    transition_type = transition_summary.get("transition_type")
+    if transition_type == "recovery":
+        score += 8.0
+    elif transition_type == "worsening":
+        score -= 10.0
+    elif transition_type == "mode_shift":
+        score -= 6.0
+
+    state_hint = _normalize_guardian_state_hint(latest_state.get("state_hint")) or "stable"
+    if state_hint == "stable":
+        score += 6.0
+    elif state_hint == "productive_struggle":
+        score += 2.0
+    elif state_hint in {"off_task_risk", "fatigue_risk"}:
+        score -= 14.0
+
+    if sample_count < 3:
+        score -= 8.0
+
+    score = round(max(0.0, min(100.0, score)), 1)
+    if score >= 78.0:
+        label = "high"
+    elif score >= 52.0:
+        label = "medium"
+    else:
+        label = "low"
+
+    if label == "high":
+        summary = "Recovery confidence is high: the latest state is close to the learner's recent baseline and no active guardian event remains."
+    elif label == "medium":
+        summary = "Recovery confidence is moderate: the state is stabilizing, but another clean block would confirm the recovery."
+    else:
+        summary = "Recovery confidence is still limited: the state has improved, but it has not yet fully returned to the learner's recent baseline."
+
+    return {
+        "score": score,
+        "label": label,
+        "stable_count": stable_count,
+        "baseline_sample_count": sample_count,
+        "baseline_delta": baseline_delta,
+        "summary": summary,
+    }
+
+
+def _refresh_guardian_derived_state(state):
+    state = _ensure_payload_dict(state)
     history = [item for item in state.get("state_history", []) if isinstance(item, dict)]
     signals = [item for item in state.get("focus_signals", []) if isinstance(item, dict)]
     latest_state = state.get("latest_state", {}) if isinstance(state.get("latest_state"), dict) else {}
-    if not latest_state and history:
-        latest_state = history[-1]
     if latest_state:
         latest_state = _finalize_guardian_snapshot(
             latest_state,
             recent_history=history[:-1] if history else [],
             focus_signals=signals,
         )
+        state["latest_state"] = latest_state
 
-    recent_history = history[-4:]
+    task_mode = _normalize_guardian_task_mode(state.get("task_mode")) or _normalize_guardian_task_mode(latest_state.get("task_mode")) or "reading"
+    baseline = _build_guardian_personal_baseline(history, task_mode=task_mode)
+    risk_flags = state.get("risk_flags", []) or _guardian_risk_flags_from_state(latest_state, signals)
+    tracker = state.get("difficulty_tracker") if isinstance(state.get("difficulty_tracker"), dict) else _default_guardian_difficulty_tracker()
+    trend_window = _build_guardian_recent_trend_window(history, latest_state, baseline)
+    transition_summary = _build_guardian_state_transition_summary(history, latest_state, tracker=tracker)
+    recovery_confidence = _build_guardian_recovery_confidence(
+        latest_state,
+        baseline,
+        tracker,
+        risk_flags,
+        transition_summary=transition_summary,
+    )
+
+    state["task_mode"] = task_mode
+    state["risk_flags"] = risk_flags
+    state["personal_baseline"] = baseline
+    state["recent_trend_window"] = trend_window
+    state["state_transition_summary"] = transition_summary
+    state["recovery_confidence"] = recovery_confidence
+    return state
+
+
+def _build_learning_state_review(mission):
+    state = _ensure_payload_dict(mission.get("learning_state_guardian"))
+    state = _refresh_guardian_derived_state(state)
+    history = [item for item in state.get("state_history", []) if isinstance(item, dict)]
+    signals = [item for item in state.get("focus_signals", []) if isinstance(item, dict)]
+    latest_state = state.get("latest_state", {}) if isinstance(state.get("latest_state"), dict) else {}
+    if not latest_state and history:
+        latest_state = history[-1]
+
+    recent_history = _guardian_recent_window(history)
     averages = {
         "focus_level": round(sum(_safe_int(item.get("focus_level"), default=0) for item in recent_history) / len(recent_history), 1)
         if recent_history
@@ -4397,7 +4745,7 @@ def _build_learning_state_review(mission):
         "fatigue_risk": _guardian_numeric_average(recent_history, "fatigue_risk"),
         "uncertainty_score": _guardian_numeric_average(recent_history, "uncertainty_score"),
     }
-    risk_flags = state.get("risk_flags", []) or _guardian_risk_flags_from_state(latest_state, signals)
+    risk_flags = state.get("risk_flags", [])
     active_difficulty_event = _guardian_difficulty_public_event(
         _ensure_payload_dict(_ensure_payload_dict(state.get("difficulty_tracker")).get("active_event")),
         status="active",
@@ -4407,6 +4755,10 @@ def _build_learning_state_review(mission):
         for item in [entry for entry in state.get("difficulty_events", []) if isinstance(entry, dict)][-4:]
     ]
     state_explanation = _guardian_state_explanation(latest_state, signals, risk_flags)
+    personal_baseline = _ensure_payload_dict(state.get("personal_baseline"))
+    recent_trend_window = _ensure_payload_dict(state.get("recent_trend_window"))
+    state_transition_summary = _ensure_payload_dict(state.get("state_transition_summary"))
+    recovery_confidence = _ensure_payload_dict(state.get("recovery_confidence"))
     recent_hints = [
         _normalize_guardian_state_hint(item.get("state_hint"))
         for item in recent_history
@@ -4491,6 +4843,10 @@ def _build_learning_state_review(mission):
             "recent_events": recent_difficulty_events,
             "event_count": len([item for item in state.get("difficulty_events", []) if isinstance(item, dict)]),
         },
+        "personal_baseline": personal_baseline,
+        "recent_trend_window": recent_trend_window,
+        "state_transition_summary": state_transition_summary,
+        "recovery_confidence": recovery_confidence,
         "trend_averages": averages,
         "trend_signals": trend_signals,
         "dominant_state_hint": dominant_state_hint,
@@ -5293,6 +5649,7 @@ def _apply_learning_state_update(mission, payload, operation):
         state["task_mode"] = snapshot.get("task_mode", "") or state.get("task_mode", "")
         state["risk_flags"] = _guardian_risk_flags_from_state(snapshot, state.get("focus_signals", []))
         difficulty_event = _update_guardian_difficulty_tracking(state, snapshot=snapshot, recorded_at=recorded_at)
+        state = _refresh_guardian_derived_state(state)
         state["updated_at"] = recorded_at
         mission["learning_state_guardian"] = state
         return {
@@ -5301,6 +5658,9 @@ def _apply_learning_state_update(mission, payload, operation):
             "risk_flags": state.get("risk_flags", []),
             "state_history_count": len(history),
             "difficulty_event": difficulty_event or {},
+            "personal_baseline": state.get("personal_baseline", {}),
+            "state_transition_summary": state.get("state_transition_summary", {}),
+            "recovery_confidence": state.get("recovery_confidence", {}),
         }
 
     if operation == "record_focus_signal":
@@ -5322,6 +5682,7 @@ def _apply_learning_state_update(mission, payload, operation):
             signal=signal,
             recorded_at=recorded_at,
         )
+        state = _refresh_guardian_derived_state(state)
         state["updated_at"] = recorded_at
         mission["learning_state_guardian"] = state
         return {
@@ -5330,6 +5691,7 @@ def _apply_learning_state_update(mission, payload, operation):
             "risk_flags": state.get("risk_flags", []),
             "focus_signal_count": len(signals),
             "difficulty_event": difficulty_event or {},
+            "recovery_confidence": state.get("recovery_confidence", {}),
         }
 
     raise ValueError(f"Unsupported learning-state operation: {operation}")
@@ -5451,6 +5813,10 @@ def _build_learning_state_chat_reply(message, mission):
     latest = review.get("latest_state", {}) or {}
     active_difficulty_event = _ensure_payload_dict(review.get("difficulty_tracking", {})).get("active_event") or {}
     state_explanation = _ensure_payload_dict(review.get("state_explanation"))
+    personal_baseline = _ensure_payload_dict(review.get("personal_baseline"))
+    recent_trend_window = _ensure_payload_dict(review.get("recent_trend_window"))
+    recovery_confidence = _ensure_payload_dict(review.get("recovery_confidence"))
+    transition_summary = _ensure_payload_dict(review.get("state_transition_summary"))
     lowered = (message or "").lower()
     if not message:
         return (
@@ -5465,6 +5831,36 @@ def _build_learning_state_chat_reply(message, mission):
                 f"{primary_driver.get('explanation', 'it is contributing the most to the current state.')}"
             )
         return "The current state looks relatively stable, so there is no dominant explanation driver yet."
+    if "baseline" in lowered:
+        if personal_baseline:
+            return (
+                f"Your recent guardian baseline for {personal_baseline.get('task_mode', 'study')} uses "
+                f"{personal_baseline.get('sample_count', 0)} snapshots. Focus baseline is "
+                f"{personal_baseline.get('focus_score', 'n/a')}/100 and load baseline is "
+                f"{personal_baseline.get('cognitive_load', 'n/a')}/100."
+            )
+        return "The guardian does not have enough stable snapshots yet to build a personal baseline."
+    if "trend" in lowered:
+        signals = _ensure_payload_dict(recent_trend_window.get("signals"))
+        focus_trend = _ensure_payload_dict(signals.get("focus_score"))
+        load_trend = _ensure_payload_dict(signals.get("cognitive_load"))
+        return (
+            f"In the recent trend window, focus is {focus_trend.get('direction', 'stable')} "
+            f"({focus_trend.get('delta', 0.0):+.1f}) and load is {load_trend.get('direction', 'stable')} "
+            f"({load_trend.get('delta', 0.0):+.1f})."
+        )
+    if "recover" in lowered or "recovery" in lowered:
+        if recovery_confidence:
+            return (
+                f"{recovery_confidence.get('summary', 'Recovery confidence is still forming.')} "
+                f"Current recovery confidence is {recovery_confidence.get('score', 'n/a')}/100 "
+                f"({recovery_confidence.get('label', 'unknown')})."
+            )
+        return "Recovery confidence is still warming up because the guardian needs more state history."
+    if "transition" in lowered or "shift" in lowered:
+        if transition_summary:
+            return transition_summary.get("summary", "The guardian does not have a clear state transition summary yet.")
+        return "The guardian needs at least two snapshots before it can summarize a state transition."
     if "focus" in lowered or "distracted" in lowered:
         if active_difficulty_event:
             return (
