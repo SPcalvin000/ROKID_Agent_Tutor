@@ -866,6 +866,114 @@ def _build_guardian_baseline_deviation_summary(latest_state, baseline):
     }
 
 
+def _build_guardian_adaptive_profile(task_mode, baseline):
+    task_mode = _normalize_guardian_task_mode(task_mode) or "reading"
+    baseline = baseline if isinstance(baseline, dict) else {}
+    default_profile = copy.deepcopy(_guardian_task_profile(task_mode))
+    sample_count = _safe_int(baseline.get("sample_count"), default=0)
+    if sample_count <= 0:
+        return {
+            "task_mode": task_mode,
+            "source": "task_profile_only",
+            "sample_count": 0,
+            "thresholds": default_profile,
+            "threshold_shift": {},
+            "summary": f"The guardian is currently using the default {task_mode} task profile because no personal baseline is available yet.",
+        }
+
+    baseline_focus = _safe_float(baseline.get("focus_score"), default=70.0)
+    baseline_load = _safe_float(baseline.get("cognitive_load"), default=default_profile["load_medium"])
+    baseline_alignment = _safe_float(baseline.get("behavioral_alignment"), default=80.0)
+    baseline_fatigue = _safe_float(baseline.get("fatigue_risk"), default=default_profile["fatigue_medium"])
+    baseline_uncertainty = _safe_float(baseline.get("uncertainty_score"), default=default_profile["uncertainty_medium"])
+    baseline_switching = _safe_float(baseline.get("switching_index"), default=default_profile["switching_high"] * 0.55)
+    baseline_drift = _safe_float(baseline.get("drift_trend"), default=default_profile["drift_rising"] * 0.75)
+
+    calibrated = copy.deepcopy(default_profile)
+    calibrated["load_medium"] = round(max(18.0, min(78.0, (default_profile["load_medium"] * 0.5) + (baseline_load * 0.5))), 1)
+    calibrated["load_high"] = round(max(calibrated["load_medium"] + 8.0, min(92.0, baseline_load + 18.0)), 1)
+    calibrated["fatigue_medium"] = round(max(20.0, min(72.0, (default_profile["fatigue_medium"] * 0.45) + (baseline_fatigue * 0.55))), 1)
+    calibrated["fatigue_high"] = round(max(calibrated["fatigue_medium"] + 10.0, min(92.0, baseline_fatigue + 20.0)), 1)
+    calibrated["uncertainty_medium"] = round(max(18.0, min(76.0, (default_profile["uncertainty_medium"] * 0.45) + (baseline_uncertainty * 0.55))), 1)
+    calibrated["uncertainty_high"] = round(max(calibrated["uncertainty_medium"] + 10.0, min(94.0, baseline_uncertainty + 22.0)), 1)
+    calibrated["behavioral_drifting"] = round(max(36.0, min(88.0, baseline_alignment - 10.0)), 1)
+    calibrated["behavioral_misaligned"] = round(max(24.0, min(calibrated["behavioral_drifting"] - 6.0, baseline_alignment - 22.0)), 1)
+    calibrated["productive_alignment"] = round(max(62.0, min(94.0, baseline_alignment - 2.0)), 1)
+    calibrated["switching_high"] = round(max(18.0, min(86.0, (default_profile["switching_high"] * 0.5) + (baseline_switching * 0.5) + 12.0)), 1)
+    calibrated["drift_rising"] = round(max(18.0, min(88.0, (default_profile["drift_rising"] * 0.45) + (baseline_drift * 0.55) + 10.0)), 1)
+    calibrated["productive_load_low"] = round(max(10.0, min(68.0, baseline_load - 8.0)), 1)
+    calibrated["productive_load_high"] = round(max(calibrated["productive_load_low"] + 10.0, min(92.0, baseline_load + 14.0)), 1)
+    calibrated["focus_guardrail"] = round(max(28.0, min(88.0, baseline_focus - 18.0)), 1)
+    calibrated["focus_recovery"] = round(max(calibrated["focus_guardrail"] + 8.0, min(96.0, baseline_focus - 4.0)), 1)
+
+    threshold_shift = {}
+    for key, value in calibrated.items():
+        if key in default_profile:
+            threshold_shift[key] = round(_safe_float(value, default=0.0) - _safe_float(default_profile[key], default=0.0), 1)
+
+    summary = (
+        f"The guardian has calibrated the {task_mode} profile using {sample_count} recent baseline snapshots. "
+        f"Focus guardrail is now {calibrated['focus_guardrail']}/100 and load-high threshold is {calibrated['load_high']}/100."
+    )
+    return {
+        "task_mode": task_mode,
+        "source": "personal_baseline_calibration",
+        "sample_count": sample_count,
+        "thresholds": calibrated,
+        "threshold_shift": threshold_shift,
+        "summary": summary,
+    }
+
+
+def _build_guardian_calibration_summary(adaptive_profile, latest_state):
+    adaptive_profile = adaptive_profile if isinstance(adaptive_profile, dict) else {}
+    latest_state = latest_state if isinstance(latest_state, dict) else {}
+    if not adaptive_profile:
+        return {}
+
+    thresholds = _ensure_payload_dict(adaptive_profile.get("thresholds"))
+    task_mode = _safe_text(adaptive_profile.get("task_mode"), max_length=40) or "reading"
+    focus_score = _optional_score_100(latest_state.get("focus_score"))
+    cognitive_load = _optional_score_100(latest_state.get("cognitive_load"))
+    fatigue_risk = _optional_score_100(latest_state.get("fatigue_risk"))
+
+    notes = []
+    if focus_score is not None and thresholds.get("focus_guardrail") is not None:
+        if focus_score < _safe_float(thresholds.get("focus_guardrail"), default=0.0):
+            notes.append("Focus is currently below the calibrated guardrail.")
+        elif focus_score >= _safe_float(thresholds.get("focus_recovery"), default=100.0):
+            notes.append("Focus has recovered into the calibrated stable band.")
+    if cognitive_load is not None and thresholds.get("load_high") is not None:
+        if cognitive_load >= _safe_float(thresholds.get("load_high"), default=100.0):
+            notes.append("Cognitive load is above the calibrated high-load threshold.")
+        elif cognitive_load >= _safe_float(thresholds.get("load_medium"), default=100.0):
+            notes.append("Cognitive load is in the calibrated mid-load range.")
+    if fatigue_risk is not None and thresholds.get("fatigue_high") is not None:
+        if fatigue_risk >= _safe_float(thresholds.get("fatigue_high"), default=100.0):
+            notes.append("Fatigue has crossed the calibrated high-fatigue threshold.")
+
+    summary = adaptive_profile.get("summary") or f"The guardian is using a calibrated {task_mode} profile."
+    return {
+        "task_mode": task_mode,
+        "source": _safe_text(adaptive_profile.get("source"), max_length=40),
+        "sample_count": _safe_int(adaptive_profile.get("sample_count"), default=0),
+        "applied_thresholds": {
+            "focus_guardrail": thresholds.get("focus_guardrail"),
+            "focus_recovery": thresholds.get("focus_recovery"),
+            "load_medium": thresholds.get("load_medium"),
+            "load_high": thresholds.get("load_high"),
+            "fatigue_medium": thresholds.get("fatigue_medium"),
+            "fatigue_high": thresholds.get("fatigue_high"),
+            "uncertainty_medium": thresholds.get("uncertainty_medium"),
+            "uncertainty_high": thresholds.get("uncertainty_high"),
+            "switching_high": thresholds.get("switching_high"),
+            "drift_rising": thresholds.get("drift_rising"),
+        },
+        "summary": summary,
+        "notes": notes[:4],
+    }
+
+
 def _build_guardian_recent_trend_window(history, latest_state, baseline=None):
     history = _guardian_recent_window(history)
     latest_state = latest_state if isinstance(latest_state, dict) else {}
@@ -3434,6 +3542,8 @@ def _default_learning_state_guardian(created_at=""):
         "baseline_deviation_summary": {},
         "state_streaks": {},
         "trajectory_outlook": {},
+        "adaptive_profile": {},
+        "calibration_summary": {},
         "updated_at": timestamp,
     }
 
@@ -5070,6 +5180,7 @@ def _refresh_guardian_derived_state(state):
 
     task_mode = _normalize_guardian_task_mode(state.get("task_mode")) or _normalize_guardian_task_mode(latest_state.get("task_mode")) or "reading"
     baseline = _build_guardian_personal_baseline(history, task_mode=task_mode)
+    adaptive_profile = _build_guardian_adaptive_profile(task_mode, baseline)
     risk_flags = state.get("risk_flags", []) or _guardian_risk_flags_from_state(latest_state, signals)
     tracker = state.get("difficulty_tracker") if isinstance(state.get("difficulty_tracker"), dict) else _default_guardian_difficulty_tracker()
     trend_window = _build_guardian_recent_trend_window(history, latest_state, baseline)
@@ -5100,6 +5211,7 @@ def _refresh_guardian_derived_state(state):
         recovery_confidence,
         active_event=active_event,
     )
+    calibration_summary = _build_guardian_calibration_summary(adaptive_profile, latest_state)
     intervention_plan = _build_guardian_intervention_plan(
         latest_state,
         state_explanation,
@@ -5121,6 +5233,8 @@ def _refresh_guardian_derived_state(state):
     state["baseline_deviation_summary"] = baseline_deviation_summary
     state["state_streaks"] = state_streaks
     state["trajectory_outlook"] = trajectory_outlook
+    state["adaptive_profile"] = adaptive_profile
+    state["calibration_summary"] = calibration_summary
     state["intervention_plan"] = intervention_plan
     return state
 
@@ -5169,6 +5283,8 @@ def _build_learning_state_review(mission):
     baseline_deviation_summary = _ensure_payload_dict(state.get("baseline_deviation_summary"))
     state_streaks = _ensure_payload_dict(state.get("state_streaks"))
     trajectory_outlook = _ensure_payload_dict(state.get("trajectory_outlook"))
+    adaptive_profile = _ensure_payload_dict(state.get("adaptive_profile"))
+    calibration_summary = _ensure_payload_dict(state.get("calibration_summary"))
     intervention_plan = _ensure_payload_dict(state.get("intervention_plan"))
     recent_hints = [
         _normalize_guardian_state_hint(item.get("state_hint"))
@@ -5263,6 +5379,8 @@ def _build_learning_state_review(mission):
         "baseline_deviation_summary": baseline_deviation_summary,
         "state_streaks": state_streaks,
         "trajectory_outlook": trajectory_outlook,
+        "adaptive_profile": adaptive_profile,
+        "calibration_summary": calibration_summary,
         "intervention_plan": intervention_plan,
         "trend_averages": averages,
         "trend_signals": trend_signals,
@@ -6082,6 +6200,8 @@ def _apply_learning_state_update(mission, payload, operation):
             "baseline_deviation_summary": state.get("baseline_deviation_summary", {}),
             "state_streaks": state.get("state_streaks", {}),
             "trajectory_outlook": state.get("trajectory_outlook", {}),
+            "adaptive_profile": state.get("adaptive_profile", {}),
+            "calibration_summary": state.get("calibration_summary", {}),
             "intervention_plan": state.get("intervention_plan", {}),
         }
 
@@ -6118,6 +6238,8 @@ def _apply_learning_state_update(mission, payload, operation):
             "baseline_deviation_summary": state.get("baseline_deviation_summary", {}),
             "state_streaks": state.get("state_streaks", {}),
             "trajectory_outlook": state.get("trajectory_outlook", {}),
+            "adaptive_profile": state.get("adaptive_profile", {}),
+            "calibration_summary": state.get("calibration_summary", {}),
             "intervention_plan": state.get("intervention_plan", {}),
         }
 
@@ -6245,6 +6367,8 @@ def _build_learning_state_chat_reply(message, mission):
     recovery_confidence = _ensure_payload_dict(review.get("recovery_confidence"))
     transition_summary = _ensure_payload_dict(review.get("state_transition_summary"))
     continuity_profile = _ensure_payload_dict(review.get("continuity_profile"))
+    adaptive_profile = _ensure_payload_dict(review.get("adaptive_profile"))
+    calibration_summary = _ensure_payload_dict(review.get("calibration_summary"))
     intervention_plan = _ensure_payload_dict(review.get("intervention_plan"))
     lowered = (message or "").lower()
     if not message:
@@ -6270,6 +6394,19 @@ def _build_learning_state_chat_reply(message, mission):
                 f"({strongest.get('delta', 0.0):+.1f})."
             )
         return "The guardian needs a stronger personal baseline before it can compare the latest state against your usual pattern."
+    if "calibration" in lowered or "adaptive" in lowered or "threshold" in lowered:
+        if calibration_summary:
+            applied = _ensure_payload_dict(calibration_summary.get("applied_thresholds"))
+            notes = calibration_summary.get("notes", [])
+            note_text = f" {notes[0]}" if notes else ""
+            return (
+                f"{calibration_summary.get('summary', 'The guardian has a calibration summary ready.')} "
+                f"Focus guardrail is {applied.get('focus_guardrail', 'n/a')}/100 and load-high is "
+                f"{applied.get('load_high', 'n/a')}/100.{note_text}"
+            )
+        if adaptive_profile:
+            return adaptive_profile.get("summary", "The guardian has an adaptive profile ready.")
+        return "The guardian does not yet have enough stable baseline data to calibrate adaptive thresholds."
     if "baseline" in lowered:
         if personal_baseline:
             return (
